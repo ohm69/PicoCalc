@@ -112,8 +112,8 @@ This project is released under the [MIT License](LICENSE). Feel free to use, mod
 ## ✉️ Contact
 
 For questions or feedback, open an [issue](https://github.com/LofiFren/PicoCalc/issues) find me on: 
-IG: [https://www.instagram.com/lofifren/]
-YT: [https://www.youtube.com/@lofifren]
+- IG: [https://www.instagram.com/lofifren/]
+- YT: [https://www.youtube.com/@lofifren]
 
 > **Tip:** After flashing the UF2, make sure the SD-card is properly seated and formatted FAT32. Enjoy tinkering!
 
