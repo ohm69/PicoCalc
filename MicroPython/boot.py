@@ -9,7 +9,8 @@ import gc
 if "/modules" not in sys.path:
     sys.path.insert(0, "/modules")
 
-# Separated imports because Micropython is super finnicky
+import sd_chk
+
 from picocalc_system import run, files
 from picocalc_system import memory, disk
 # from picocalc_system import clear as clear
