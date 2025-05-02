@@ -5,11 +5,12 @@ import vt
 import sys
 import time
 import gc
-
-if "/modules" not in sys.path:
-    sys.path.insert(0, "/modules")
-
 import sd_chk
+
+paths_to_add = ["/sd/py_scripts", "/modules"]
+for path in paths_to_add:
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
 from picocalc_system import run, files
 from picocalc_system import memory, disk
