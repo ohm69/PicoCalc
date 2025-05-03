@@ -1,6 +1,6 @@
 """
 Fixed BLE File Transfer for PicoCalc RP2350
-Uses basic BLE functionality with proper data handling for IRQ events
+With improved exit handling and clean shutdown
 """
 
 import picocalc
@@ -9,6 +9,11 @@ import os
 import gc
 import struct
 from micropython import const
+
+from picocalc import PicoKeyboard   # ← pull in the keyboard API
+
+# create one global keyboard instance
+kbd = PicoKeyboard()
 
 # Import necessary BLE modules
 try:
@@ -19,7 +24,7 @@ except ImportError:
 
 # Configuration settings
 DEBUG_MODE = False  # Set to False to disable debug messages
-CHUNK_SIZE = 20     # Can be increased for better performance if supported by host
+CHUNK_SIZE = 240     # Can be increased for better performance if supported by host
 MAX_RETRIES = 3     # Number of retries for operations
 
 # Define constants for BLE operation
@@ -34,6 +39,7 @@ CMD_FILE_DATA = const(3)
 CMD_FILE_END = const(4)
 CMD_MKDIR = const(5)
 CMD_DELETE = const(6)
+CMD_DELETE_DIR = const(7)
 
 # IRQ event codes
 _IRQ_CENTRAL_CONNECT = const(1)
@@ -58,59 +64,132 @@ ble = None
 services = None
 rx_handle = None
 tx_handle = None
+shutdown_requested = False  # Flag to indicate shutdown
 
 # File transfer state
 current_file = None
 current_path = ""
 bytes_received = 0
 
+# Activity indicator
+activity_dots = 0
+activity_color = 0x07E0  # Green
+next_activity_update = 0
+
+# Exit flag for keyboard interrupt
+want_exit = False
+
+# artsy bouncing-square + breathing-bar idle indicator
+idle_frame = 0
+def show_idle():
+    global idle_frame
+    d = picocalc.display
+    if not d or shutdown_requested:
+        return
+    d.fill(0)
+    # 1) Bouncing red square across the top
+    span = 200
+    x = idle_frame % (span * 2)
+    if x > span:
+        x = 2 * span - x
+    d.fill_rect(10 + x, 20, 12, 12, 0xF800)
+    # 2) Breathing cyan bar underneath
+    bar_w = ((idle_frame % 20) * 4) + 4
+    d.fill_rect(10, 50, bar_w, 4, 0x07FF)
+    # 3) Flickering “Ready” text that swaps red/green
+    col = 0xF800 if (idle_frame % 10) < 5 else 0x07E0
+    d.text("Ready", 10, 100, col)
+    d.show()
+    idle_frame += 1
+
 def debug_print(message):
     """Print debug messages only if DEBUG_MODE is enabled"""
-    if DEBUG_MODE:
+    if DEBUG_MODE and not shutdown_requested:
         print("[DEBUG] " + message)
 
-def update_display(message):
-    """Update display with status message"""
-    if picocalc.display:
+def get_activity_indicator():
+    """Get activity indicator string"""
+    global activity_dots
+    if activity_dots == 0:
+        return "..."
+    elif activity_dots == 1:
+        return ". ."
+    elif activity_dots == 2:
+        return ".. "
+    elif activity_dots == 3:
+        return ".  "
+    else:
+        return "  ."
+
+def update_activity():
+    """Update activity indicator"""
+    global activity_dots, next_activity_update
+    now = time.ticks_ms()
+    if time.ticks_diff(now, next_activity_update) > 0:
+        next_activity_update = now + 200  # Update every 200ms
+        activity_dots = (activity_dots + 1) % 4
+
+def update_display(message, color=None, show_activity=False, clear=True):
+    """Update display with status message and visual feedback"""
+    global activity_color
+    
+    if not picocalc.display or shutdown_requested:
+        return
+        
+    if clear:
         # Clear display
         picocalc.display.fill(0)
-        
-        # Title
+    
+    # Update activity if needed
+    if show_activity:
+        update_activity()
+    
+    # Title with activity indicator
+    if show_activity:
+        if color:
+            activity_color = color
+        indicator = get_activity_indicator()
+        picocalc.display.text(f"BLE File Transfer {indicator}", 10, 10, activity_color)
+    else:
         picocalc.display.text("BLE File Transfer", 10, 10, 1)
-        
-        # Split message lines
+    
+    # Split message lines
+    if message:
         lines = message.split('\n')
         y = 40
         for line in lines:
-            picocalc.display.text(line, 20, y, 1)
+            display_color = color if color else 1
+            picocalc.display.text(line, 20, y, display_color)
             y += 20
-        
-        # Show info
-        if is_connected:
-            picocalc.display.text("Status: Connected", 10, 240, 1)
-        else:
-            picocalc.display.text("Status: Waiting for connection", 10, 240, 1)
-        
-        # Memory info
-        free_mem = gc.mem_free()
-        picocalc.display.text(f"Memory: {free_mem // 1024}K free", 10, 260, 1)
-        
-        # Instructions
-        picocalc.display.text("Press ESC to exit", 10, 280, 1)
-        
-        # Show the display
-        picocalc.display.show()
+    
+    # Show info
+    if is_connected:
+        picocalc.display.text("Status: Connected", 10, 240, 0x07E0)  # Green
+    else:
+        picocalc.display.text("Status: Waiting for connection", 10, 240, 0x001F)  # Blue
+    
+    # Memory info
+    free_mem = gc.mem_free()
+    picocalc.display.text(f"Memory: {free_mem // 1024}K free", 10, 260, 1)
+    
+    # Instructions
+    picocalc.display.text("Press ESC to exit", 10, 280, 0xF800)  # Red
+    
+    # Show the display
+    picocalc.display.show()
 
 def update_display_progress():
     """Update display with progress bar"""
-    if not picocalc.display:
+    if not picocalc.display or shutdown_requested:
         return
     
     # Clear display
     picocalc.display.fill(0)
     
-    # Title
-    picocalc.display.text("File Transfer Progress", 10, 10, 1)
+    # Title with activity indicator
+    update_activity()
+    indicator = get_activity_indicator()
+    picocalc.display.text(f"File Transfer {indicator}", 10, 10, 0x001F)  # Blue
     
     # File info
     filename = current_path.split('/')[-1]
@@ -131,7 +210,7 @@ def update_display_progress():
     progress = min(1.0, bytes_received / max_visual)
     fill_width = int(progress * (bar_width - 4))
     if fill_width > 0:
-        picocalc.display.fill_rect(bar_x + 2, bar_y + 2, fill_width, bar_height - 4, 1)
+        picocalc.display.fill_rect(bar_x + 2, bar_y + 2, fill_width, bar_height - 4, 0x07E0)  # Green
     
     # Progress percentage
     percent = min(100, int(progress * 100))
@@ -142,7 +221,7 @@ def update_display_progress():
     picocalc.display.text(f"Memory: {free_mem // 1024}K free", 10, 180, 1)
     
     # Instructions
-    picocalc.display.text("Press ESC to cancel", 10, 280, 1)
+    picocalc.display.text("Press ESC to cancel", 10, 280, 0xF800)  # Red
     
     # Show the display
     picocalc.display.show()
@@ -253,7 +332,7 @@ def list_directory(path):
         
         # Send response in chunks
         send_chunked_data(response)
-        update_display(f"Listed directory: {path}")
+        update_display(f"Listed directory: {path}", color=0x07E0, show_activity=True)
         
     except Exception as e:
         debug_print(f"Error listing directory: {e}")
@@ -319,7 +398,7 @@ def start_file_transfer(path):
             send_error_response(CMD_FILE_INFO)
             return
         
-        update_display(f"Receiving file:\n{path.split('/')[-1]}")
+        update_display(f"Receiving file:\n{path.split('/')[-1]}", color=0x001F, show_activity=True)
         
     except Exception as e:
         debug_print(f"Error starting file transfer: {e}")
@@ -372,7 +451,7 @@ def end_file_transfer():
         ble.gatts_notify(conn_handle, tx_handle, response)
         
         debug_print(f"Transfer complete: {bytes_received} bytes")
-        update_display(f"Transfer complete:\n{current_path.split('/')[-1]}\n{bytes_received} bytes")
+        update_display(f"Transfer complete:\n{current_path.split('/')[-1]}\n{bytes_received} bytes", color=0x07E0, show_activity=False)
         
         # Reset
         file_path = current_path  # Save for display
@@ -404,11 +483,46 @@ def make_directory(path):
         response = bytearray([CMD_MKDIR, 0])  # Success
         ble.gatts_notify(conn_handle, tx_handle, response)
         
-        update_display(f"Created directory: {path}")
+        update_display(f"Created directory: {path}", color=0x07E0, show_activity=True)
         
     except Exception as e:
         debug_print(f"Error creating directory: {e}")
         send_error_response(CMD_MKDIR)
+
+def delete_directory(path):
+    """Delete a directory recursively"""
+    global conn_handle, tx_handle
+    
+    debug_print(f"Deleting directory: {path}")
+    
+    try:
+        # Ensure path starts with /sd
+        if not path.startswith("/sd"):
+            path = "/sd/" + path.lstrip('/')
+            
+        # Remove directory recursively
+        import os
+        def rmdir_recursive(directory):
+            for file in os.listdir(directory):
+                full_path = directory + "/" + file
+                stat = os.stat(full_path)
+                if stat[0] & 0x4000:  # Directory
+                    rmdir_recursive(full_path)
+                else:  # File
+                    os.remove(full_path)
+            os.rmdir(directory)
+        
+        rmdir_recursive(path)
+        
+        # Send response
+        response = bytearray([CMD_DELETE_DIR, 0])  # Success
+        ble.gatts_notify(conn_handle, tx_handle, response)
+        
+        update_display(f"Deleted directory: {path}", color=0xF800, show_activity=True)  # Red for deletion
+        
+    except Exception as e:
+        debug_print(f"Error deleting directory: {e}")
+        send_error_response(CMD_DELETE_DIR)
 
 def delete_file(path):
     """Delete a file"""
@@ -428,7 +542,7 @@ def delete_file(path):
         response = bytearray([CMD_DELETE, 0])  # Success
         ble.gatts_notify(conn_handle, tx_handle, response)
         
-        update_display(f"Deleted file: {path}")
+        update_display(f"Deleted file: {path}", color=0xF800, show_activity=True)  # Red for deletion
         
     except Exception as e:
         debug_print(f"Error deleting file: {e}")
@@ -436,40 +550,34 @@ def delete_file(path):
 
 def ble_irq(event, data):
     """Handle BLE IRQ events"""
-    global is_connected, conn_handle, ble, rx_handle
+    global is_connected, conn_handle, ble, rx_handle, shutdown_requested
     
+    # Ignore events during shutdown
+    if shutdown_requested:
+        return
+        
     debug_print(f"BLE event: {event}, data: {data}")
     
-    # Fix: Handle the connect event data structure properly
     if event == _IRQ_CENTRAL_CONNECT:
         # Store just the first value as conn_handle
         conn_handle = data[0]  # This should work regardless of tuple structure
         is_connected = True
         debug_print(f"Connected, handle: {conn_handle}")
-        update_display(f"Connected")
+        update_display(f"Connected", color=0x07E0, show_activity=False)
         
     elif event == _IRQ_CENTRAL_DISCONNECT:
         is_connected = False
         debug_print("Disconnected")
         cleanup_transfer()
-        update_display("Disconnected. Ready.")
+        update_display("Disconnected. Ready.", color=0x001F, show_activity=False)
         
-        # Start advertising again to allow a new connection
-        try:
-            debug_print("Restarting advertising")
-            ble.gap_advertise(100000, adv_data=get_adv_payload())
-        except Exception as e:
-            debug_print(f"Failed to restart advertising: {e}")
-            # Try to recover BLE in case of serious errors
+        # Only restart advertising if not shutting down
+        if not shutdown_requested:
             try:
-                time.sleep_ms(500)
-                ble.active(False)
-                time.sleep_ms(500)
-                ble.active(True)
+                debug_print("Restarting advertising")
                 ble.gap_advertise(100000, adv_data=get_adv_payload())
-                debug_print("BLE recovered and advertising restarted")
-            except:
-                debug_print("BLE recovery failed")
+            except Exception as e:
+                debug_print(f"Failed to restart advertising: {e}")
         
     elif event == _IRQ_GATTS_WRITE:
         # Handle a client write to a characteristic
@@ -487,7 +595,7 @@ def ble_irq(event, data):
 
 def process_command(data):
     """Process incoming command"""
-    if not data or len(data) < 1:
+    if not data or len(data) < 1 or shutdown_requested:
         return
         
     # First byte is the command
@@ -529,6 +637,12 @@ def process_command(data):
         if len(data) > 1:
             path = data[1:].decode('utf-8')
             delete_file(path)
+            
+    elif command == CMD_DELETE_DIR:
+        # Delete directory
+        if len(data) > 1:
+            path = data[1:].decode('utf-8')
+            delete_directory(path)
     else:
         debug_print(f"Unknown command: {command}")
 
@@ -618,10 +732,46 @@ def init_bluetooth():
         debug_print(f"Error initializing Bluetooth: {e}")
         return False
 
+def check_keyboard_exit():
+    """
+    Poll the PicoCalc’s keyboard for an ESC press.
+    Uses the PicoKeyboard.readinto() API to grab raw bytes.
+    """
+    try:
+        buf = bytearray(1)
+        n = kbd.readinto(buf)              # readinto returns number of bytes read
+        if n and buf[0] == 27:             # 27 == ESC
+            return True
+    except Exception as e:
+        debug_print(f"Keyboard check error: {e}")
+        # if this still fails, dump the available API so you can pick the right one:
+        debug_print(f"Available PicoKeyboard methods: {dir(kbd)}")
+    return False
+
+def check_for_exit():
+    """Check for ESC to exit"""
+    global want_exit
+    
+    # If some other part of the code already flagged exit, honour it
+    if want_exit:
+        return True
+
+    # Otherwise poll the keyboard
+    if check_keyboard_exit():
+        want_exit = True
+        return True
+
+    return False
+
 def main():
-    """Main function"""
+    """Main function with improved exit handling"""
+    global shutdown_requested, want_exit
+    
     # Force garbage collection before starting
     gc.collect()
+    
+    # Initialize want_exit flag
+    want_exit = False
     
     # Check if SD card is mounted
     if not check_sd_card():
@@ -629,15 +779,17 @@ def main():
         print("Please ensure SD card is properly inserted.")
         if picocalc.display:
             picocalc.display.fill(0)
-            picocalc.display.text("ERROR: SD card not mounted", 10, 10, 1)
-            picocalc.display.text("Insert SD card and restart", 10, 30, 1)
+            picocalc.display.text("ERROR: SD card not mounted", 10, 10, 0xF800)  # Red
+            picocalc.display.text("Insert SD card and restart", 10, 30, 0xF800)
             picocalc.display.show()
+        time.sleep(3)
         return
     
     try:
         # Print memory information
         free = gc.mem_free()
-        print(f"Free memory: {free} bytes")
+        if DEBUG_MODE:
+            print(f"Free memory: {free} bytes")
         
         # Initialize Bluetooth
         if not init_bluetooth():
@@ -645,42 +797,85 @@ def main():
             return
             
         # Update display
-        update_display("Ready for connection")
-        
-        print("BLE File Transfer running.")
-        print("Press Ctrl+C or ESC to exit.")
+        update_display("Ready for connection", color=0x001F)
+
+        if DEBUG_MODE:
+            print("BLE File Transfer running.")
+            print("Press ESC to exit.")
         
         try:
-            # Main loop - wait for escape key or Ctrl+C
-            key_buffer = bytearray(10)
-            
-            while True:
-                # Check for ESC key if terminal is available
-                if picocalc.terminal:
-                    count = picocalc.terminal.readinto(key_buffer)
-                    if count and bytes(key_buffer[:count]) == b'\x1b\x1b':  # Double ESC
-                        break
+            # Main loop - wait for ESC to exit
+            while not shutdown_requested:
+                # Check for exit conditions
+                if check_for_exit():
+                    print("\nExit requested - Shutting down...")
+                    shutdown_requested = True
+                    break
                 
                 # Brief delay to prevent tight loop
-                time.sleep_ms(100)
+                time.sleep_ms(50)
+                
+                # Update display periodically
+                if is_connected and not current_file:
+                    update_display("Connected", color=0x07E0, show_activity=True)
+                elif not is_connected:
+                    show_idle()
                 
                 # Periodic memory cleanup to prevent fragmentation
                 if not is_connected and not current_file:
-                    # Only run GC when idle
                     gc.collect()
-                
-        except KeyboardInterrupt:
-            print("\nTransfer service interrupted.")
         
-        # Stop BLE
+        except KeyboardInterrupt:
+            print("\nKeyboard interrupt detected")
+            shutdown_requested = True
+            want_exit = True
+        except Exception as e:
+            print(f"\nMain loop error: {e}")
+            shutdown_requested = True
+        
+        # Shutdown sequence
+        shutdown_requested = True
+        print("Shutting down...")
+        
+        # Clean up - stop processing new commands
+        cleanup_transfer()
+        
+        # Stop BLE properly
         if ble:
-            ble.active(False)
-        print("Bluetooth stopped")
+            try:
+                # Disconnect any active connection
+                if is_connected and conn_handle:
+                    try:
+                        ble.gap_disconnect(conn_handle)
+                    except:
+                        pass
+                
+                # Disable BLE
+                ble.active(False)
+                print("Bluetooth stopped")
+            except Exception as e:
+                print(f"Error stopping Bluetooth: {e}")
+        
+        # Clear display
+        if picocalc.display:
+            picocalc.display.fill(0)
+            picocalc.display.text("BLE Service Stopped", 10, 10, 0xF800)  # Red
+            picocalc.display.text("Exiting...", 10, 40, 1)
+            picocalc.display.show()
+            time.sleep(1)
+            
+        print("Exit complete")
         
     except Exception as e:
         print(f"Error: {e}")
         import sys
         sys.print_exception(e)
+        if picocalc.display:
+            picocalc.display.fill(0)
+            picocalc.display.text("Error occurred", 10, 10, 0xF800)
+            picocalc.display.text("Check console", 10, 40, 1)
+            picocalc.display.show()
+            time.sleep(3)
 
 # For direct execution
 if __name__ == "__main__":

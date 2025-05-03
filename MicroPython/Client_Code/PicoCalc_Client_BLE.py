@@ -1,6 +1,7 @@
 """
-Updated BLE Client for PicoCalc
-Specifically modified to work with the fixed BLE File Transfer server
+Enhanced BLE Client for PicoCalc
+Modified to work with multiple PicoCalc devices and supports both MAC and UUID device identifiers
+Updated to fix Bleak deprecation warnings
 """
 
 import asyncio
@@ -10,7 +11,9 @@ import struct
 import time
 from pathlib import Path
 import platform
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
+import json
+import re
 
 try:
     from bleak import BleakClient, BleakScanner
@@ -21,8 +24,8 @@ except ImportError:
     print("Please install it using: pip install bleak")
     sys.exit(1)
 
-# PicoCalc device name
-DEVICE_NAME = "PicoCalc-BLE"  # Updated to match server's name
+# Default device name patterns to look for
+DEVICE_NAME_PATTERNS = ["PicoCalc", "PicoCalc-BLE", "PicoCalc-Test"]
 
 # UUIDs for Nordic UART Service
 _NUS_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
@@ -37,12 +40,46 @@ CMD_FILE_DATA = 3
 CMD_FILE_END = 4
 CMD_MKDIR = 5
 CMD_DELETE = 6
-CMD_DELETE_DIR = 7  # New command for directory deletion
+CMD_DELETE_DIR = 7  # Command for directory deletion
 
 # Chunk size for file transfer
 CHUNK_SIZE = 20  # Match server chunk size
 
-class UpdatedBLEClient:
+# Config file for storing device preferences
+CONFIG_FILE = "picocalc_client_config.json"
+
+class DeviceInfo:
+    """Class to store device information"""
+    def __init__(self, address: str, name: str = "Unknown", rssi: int = 0, uuids: List[str] = None):
+        self.address = address
+        self.name = name
+        self.rssi = rssi
+        self.uuids = uuids or []
+        self.last_connected = 0  # Timestamp of last connection
+        
+    def to_dict(self) -> Dict[str, Any]:
+        """Convert to dictionary for JSON serialization"""
+        return {
+            "address": self.address,
+            "name": self.name,
+            "rssi": self.rssi,
+            "uuids": self.uuids,
+            "last_connected": self.last_connected
+        }
+    
+    @classmethod
+    def from_dict(cls, data: Dict[str, Any]) -> 'DeviceInfo':
+        """Create from dictionary"""
+        device = cls(
+            address=data["address"],
+            name=data.get("name", "Unknown"),
+            rssi=data.get("rssi", 0),
+            uuids=data.get("uuids", [])
+        )
+        device.last_connected = data.get("last_connected", 0)
+        return device
+
+class EnhancedBLEClient:
     def __init__(self):
         self.client = None
         self.device = None
@@ -52,125 +89,388 @@ class UpdatedBLEClient:
         self.response_event = asyncio.Event()
         self.last_cmd = CMD_NONE
         self.verbose = False  # Enable verbose logging
+        self.known_devices = self.load_known_devices()
+        self.scan_timeout = 15.0  # Scan timeout in seconds
         
-    async def extended_scan(self) -> Optional[str]:
-        """Perform enhanced scanning with more efficient device selection"""
-        print("Starting Bluetooth scan...")
-        print(f"Running on: {platform.system()} {platform.release()}")
-        
-        # Store previously connected device address in a file
-        last_device_file = "last_picocalc_device.txt"
-        last_device_address = None
-
-        # Try to load last connected device
+    def load_known_devices(self) -> Dict[str, DeviceInfo]:
+        """Load known devices from config file"""
+        devices = {}
         try:
-            if os.path.exists(last_device_file):
-                with open(last_device_file, "r") as f:
-                    last_device_address = f.read().strip()
-                    print(f"Found previous device: {last_device_address}")
-                    
-                    # Ask if user wants to connect to the same device
-                    choice = input(f"Connect to previously used device? (y/n): ")
-                    if choice.lower() == 'y':
-                        self.device_address = last_device_address
-                        return last_device_address
+            if os.path.exists(CONFIG_FILE):
+                with open(CONFIG_FILE, "r") as f:
+                    data = json.load(f)
+                    for addr, dev_data in data.items():
+                        devices[addr] = DeviceInfo.from_dict(dev_data)
+                print(f"Loaded {len(devices)} known devices from config")
         except Exception as e:
-            print(f"Could not read last device: {e}")
-        
-        # Single combined scan approach
+            print(f"Error loading known devices: {e}")
+        return devices
+    
+    def save_known_devices(self):
+        """Save known devices to config file"""
         try:
-            print("Scanning for all nearby Bluetooth devices (15s)...")
-            devices = await BleakScanner.discover(timeout=15.0)
+            data = {addr: dev.to_dict() for addr, dev in self.known_devices.items()}
+            with open(CONFIG_FILE, "w") as f:
+                json.dump(data, f, indent=2)
+            print(f"Saved {len(self.known_devices)} known devices to config")
+        except Exception as e:
+            print(f"Error saving known devices: {e}")
             
-            # Filter devices to show known ones first
-            known_devices = []
-            picocalc_devices = []
-            unknown_devices = []
-            
-            for device in devices:
-                name = device.name or "Unknown"
-                if name == DEVICE_NAME:
-                    # Exact match for PicoCalc-BLE
-                    picocalc_devices.insert(0, device)
-                elif "PicoCalc" in name:
-                    # Other PicoCalc devices
-                    picocalc_devices.append(device)
-                elif name != "Unknown":
-                    # Any device with a name
-                    known_devices.append(device)
-                else:
-                    # Unnamed devices
-                    unknown_devices.append(device)
-            
-            # Combine all devices with known ones at the top
-            all_devices = picocalc_devices + known_devices + unknown_devices
-            
-            if not all_devices:
-                print("No Bluetooth devices found. Check if Bluetooth is enabled.")
-                return None
-            
-            # Display all devices sorted by relevance
-            print("\nAll nearby Bluetooth devices:")
-            print("-" * 50)
-            for i, device in enumerate(all_devices):
-                name = device.name or "Unknown"
-                addr = device.address
+    def add_known_device(self, device: DeviceInfo):
+        """Add or update a known device"""
+        self.known_devices[device.address] = device
+        self.save_known_devices()
+    
+    def is_valid_uuid(self, address: str) -> bool:
+        """Check if the address is a valid UUID"""
+        # Simple UUID pattern check (8-4-4-4-12 hex digits)
+        uuid_pattern = re.compile(r'^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$', re.IGNORECASE)
+        return bool(uuid_pattern.match(address))
+    
+    def is_valid_mac(self, address: str) -> bool:
+        """Check if the address is a valid MAC address"""
+        # MAC address pattern (XX:XX:XX:XX:XX:XX or XX-XX-XX-XX-XX-XX)
+        mac_pattern = re.compile(r'^([0-9A-F]{2}[:-]){5}([0-9A-F]{2})$', re.IGNORECASE)
+        return bool(mac_pattern.match(address))
+    
+    def is_valid_address(self, address: str) -> bool:
+        """Check if the address is valid (either MAC or UUID)"""
+        return self.is_valid_mac(address) or self.is_valid_uuid(address)
+    
+    async def scan_for_specific_device(self, address: str) -> Optional[bleak.BLEDevice]:
+        """Scan for a specific device by address"""
+        print(f"Looking for device with address: {address}")
+        try:
+            # For UUID format identifiers, we need a different approach
+            if self.is_valid_uuid(address):
+                # Scan for all devices and find the one with matching UUID
+                devices_with_adverts = []
+                def _device_detection_callback(device, advertisement_data):
+                    devices_with_adverts.append((device, advertisement_data))
                 
-                # Highlight PicoCalc devices
-                if "PicoCalc" in name:
-                    print(f"{i+1}. \033[1m{name} - {addr}\033[0m  ← PicoCalc device")
-                else:
-                    print(f"{i+1}. {name} - {addr}")
-            print("-" * 50)
+                scanner = BleakScanner(detection_callback=_device_detection_callback)
+                await scanner.start()
+                await asyncio.sleep(10.0)  # Scan for 10 seconds
+                await scanner.stop()
+                
+                for device, adv_data in devices_with_adverts:
+                    if device.address.upper() == address.upper():
+                        return device
+                    
+                    # Check service UUIDs
+                    if hasattr(adv_data, 'service_uuids'):
+                        if any(address.upper() in str(uuid).upper() for uuid in adv_data.service_uuids):
+                            return device
+                return None
+            else:
+                # Standard MAC address lookup
+                return await BleakScanner.find_device_by_address(address, timeout=10.0)
+        except Exception as e:
+            print(f"Error scanning for specific device: {e}")
+            return None
+    
+    async def extended_scan(self) -> Optional[str]:
+            """Perform enhanced scanning with device deduplication"""
+            print("Starting Bluetooth scan...")
+            print(f"Running on: {platform.system()} {platform.release()}")
             
-            # Let user select a device
-            while True:
-                choice = input("\nSelect your PicoCalc device number or 'm' for manual address entry: ")
-                if choice.lower() == 'm':
-                    custom_addr = input("Enter the device address manually: ")
-                    if custom_addr:
-                        print(f"Using manual address: {custom_addr}")
-                        self.device_address = custom_addr
-                        
-                        # Save this address for next time
-                        with open(last_device_file, "w") as f:
-                            f.write(custom_addr)
-                            
-                        return custom_addr
-                else:
-                    try:
-                        idx = int(choice) - 1
-                        if 0 <= idx < len(all_devices):
-                            device = all_devices[idx]
-                            print(f"Selected: {device.name or 'Unknown'} - {device.address}")
+            # Initialize choice variable
+            choice = ""
+            
+            # Handle recent devices first
+            if self.known_devices:
+                # Sort known devices by last connection time (most recent first)
+                recent_devices = sorted(
+                    self.known_devices.values(), 
+                    key=lambda d: d.last_connected, 
+                    reverse=True
+                )
+                
+                print("\nRecently connected devices:")
+                for i, device in enumerate(recent_devices[:5]):  # Show up to 5 recent devices
+                    # Calculate time since last connection
+                    time_ago = "Never" if device.last_connected == 0 else self.get_time_ago(device.last_connected)
+                    print(f"{i+1}. {device.name} - {device.address} (Last used: {time_ago})")
+                    
+                choice = input("Connect to a recent device? (enter number, or 's' to scan, or 'c' for custom address): ")
+                
+                if choice.isdigit():
+                    idx = int(choice) - 1
+                    if 0 <= idx < len(recent_devices):
+                        # Try to find the device
+                        device = await self.scan_for_specific_device(recent_devices[idx].address)
+                        if device:
+                            print(f"Found device: {device.name or 'Unknown'} ({device.address})")
                             self.device = device
                             self.device_address = device.address
-                            
-                            # Save this address for next time
-                            with open(last_device_file, "w") as f:
-                                f.write(device.address)
-                                
                             return device.address
                         else:
-                            print("Invalid selection. Please try again.")
-                    except ValueError:
-                        print("Invalid input. Please enter a number or 'm'.")
+                            print(f"Device {recent_devices[idx].name} not found. Proceeding to full scan.")
+                elif choice.lower() == 'c':
+                    custom_addr = input("Enter the device address (MAC or UUID): ")
+                    if custom_addr:
+                        self.device_address = custom_addr
+                        return custom_addr
                         
-        except Exception as e:
-            print(f"Scan error: {e}")
+            # Perform full scan
+            if choice.lower() != 's' and choice.lower() != 'c' and not choice.isdigit():
+                print("\nPerforming full scan for PicoCalc devices...")
             
-            # Fallback to manual entry if scan fails
-            custom_addr = input("Enter the device address manually: ")
-            if custom_addr:
-                print(f"Using manual address: {custom_addr}")
-                self.device_address = custom_addr
-                return custom_addr
+            # Perform full scan
+            try:
+                print(f"Scanning for Bluetooth devices ({self.scan_timeout}s)...")
+                
+                # Dictionary to store unique devices by address
+                discovered_devices = {}
+                
+                def _device_detection_callback(device, advertisement_data):
+                    # Keep track of signal strength and update if stronger signal found
+                    if device.address not in discovered_devices:
+                        discovered_devices[device.address] = {
+                            'device': device,
+                            'adv_data': advertisement_data,
+                            'best_rssi': advertisement_data.rssi if hasattr(advertisement_data, 'rssi') else 0,
+                            'scan_count': 1
+                        }
+                    else:
+                        # Update best RSSI if this signal is stronger
+                        current_rssi = advertisement_data.rssi if hasattr(advertisement_data, 'rssi') else 0
+                        if current_rssi > discovered_devices[device.address]['best_rssi']:
+                            discovered_devices[device.address]['best_rssi'] = current_rssi
+                            discovered_devices[device.address]['adv_data'] = advertisement_data
+                        discovered_devices[device.address]['scan_count'] += 1
+                
+                scanner = BleakScanner(detection_callback=_device_detection_callback)
+                await scanner.start()
+                await asyncio.sleep(self.scan_timeout)
+                await scanner.stop()
+                
+                # Group devices by relevance
+                picocalc_devices = []  # Exact matches to any PicoCalc patterns
+                named_devices = []     # Any device with a name
+                unnamed_devices = []   # Devices without names
+                
+                for addr, dev_info in discovered_devices.items():
+                    device = dev_info['device']
+                    adv_data = dev_info['adv_data']
+                    best_rssi = dev_info['best_rssi']
+                    scan_count = dev_info['scan_count']
+                    
+                    name = device.name or "Unknown"
+                    
+                    # Check if device name matches any of our patterns
+                    is_picocalc = any(pattern in name for pattern in DEVICE_NAME_PATTERNS)
+                    
+                    # Get UUIDs from advertisement data
+                    uuids = []
+                    if hasattr(adv_data, 'service_uuids'):
+                        uuids = adv_data.service_uuids
+                    
+                    # Store device info for later
+                    device_info = DeviceInfo(
+                        address=addr,
+                        name=name,
+                        rssi=best_rssi,
+                        uuids=uuids
+                    )
+                    
+                    # Add to appropriate list with all data
+                    device_data = (device, device_info, adv_data, scan_count)
+                    
+                    if is_picocalc:
+                        picocalc_devices.append(device_data)
+                    elif name != "Unknown":
+                        named_devices.append(device_data)
+                    else:
+                        unnamed_devices.append(device_data)
+                        
+                    # Add to known devices
+                    self.known_devices[device.address] = device_info
+                
+                # Save discovered devices
+                self.save_known_devices()
+                
+                # Combine all devices with relevant ones at the top
+                all_devices = picocalc_devices + named_devices + unnamed_devices
+                
+                if not all_devices:
+                    print("No Bluetooth devices found. Check if Bluetooth is enabled.")
+                    
+                    # Offer manual entry as a fallback
+                    custom_addr = input("Enter device address manually (MAC or UUID): ")
+                    if custom_addr:
+                        self.device_address = custom_addr
+                        return custom_addr
+                    return None
+                
+                # Display all devices sorted by relevance
+                print("\nAll nearby Bluetooth devices:")
+                print("-" * 90)
+                print(f"{'#':<3} {'Device Name':<25} {'Address/UUID':<40} {'Signal':<10} {'Scans':<8}")
+                print("-" * 90)
+                
+                for i, (device, info, adv_data, scan_count) in enumerate(all_devices):
+                    name = device.name or "Unknown"
+                    addr = device.address
+                    
+                    # Get signal strength from advertisement data
+                    signal = f"{info.rssi} dBm" if info.rssi else "N/A"
+                    
+                    # Get UUIDs (for detecting if it has Nordic UART Service)
+                    has_nus = False
+                    if hasattr(adv_data, 'service_uuids'):
+                        has_nus = any(_NUS_UUID.lower() in str(uuid).lower() for uuid in adv_data.service_uuids)
+                    
+                    # Determine if the device is likely a PicoCalc
+                    is_likely_picocalc = has_nus or any(pattern in name for pattern in DEVICE_NAME_PATTERNS)
+                    
+                    # Limit address length for display
+                    display_addr = addr
+                    if len(addr) > 38:
+                        display_addr = addr[:18] + "..." + addr[-17:]
+                    
+                    # Highlight PicoCalc devices
+                    if is_likely_picocalc:
+                        print(f"{i+1:<3} \033[1m{name:<25} {display_addr:<40} {signal:<10} {scan_count:<8}\033[0m")
+                    else:
+                        print(f"{i+1:<3} {name:<25} {display_addr:<40} {signal:<10} {scan_count:<8}")
+                
+                print("-" * 90)
+                
+                # Let user select a device
+                while True:
+                    choice = input(
+                        "\nSelect device #, 'm' manual entry,\n"
+                        " 'f' for more details,\n"
+                        " 's' longer scan, or 'b' to cancel: "
+                    ).strip().lower()
+
+                    if choice == 'b':
+                        print("Device selection cancelled.")
+                        return None
+                    
+                    if choice.lower() == 'm':
+                        custom_addr = input("Enter the device address manually (MAC or UUID): ")
+                        if custom_addr:
+                            print(f"Using address: {custom_addr}")
+                            self.device_address = custom_addr
+                            
+                            # Save this address as a known device
+                            device_info = DeviceInfo(address=custom_addr, name="Manual Entry")
+                            device_info.last_connected = int(time.time())
+                            self.add_known_device(device_info)
+                            
+                            return custom_addr
+                            
+                    elif choice.lower() == 'f':
+                        # Show more details about devices
+                        self.show_detailed_device_info(all_devices)
+                        
+                    elif choice.lower() == 's':
+                        # Scan again with longer timeout
+                        self.scan_timeout += 10.0
+                        print(f"Scanning again with {self.scan_timeout}s timeout...")
+                        return await self.extended_scan()
+                        
+                    else:
+                        try:
+                            idx = int(choice) - 1
+                            if 0 <= idx < len(all_devices):
+                                device, device_info, _, _ = all_devices[idx]
+                                print(f"Selected: {device.name or 'Unknown'} - {device.address}")
+                                
+                                # Update last connected time
+                                device_info.last_connected = int(time.time())
+                                self.add_known_device(device_info)
+                                
+                                self.device = device
+                                self.device_address = device.address
+                                return device.address
+                            else:
+                                print("Invalid selection. Please try again.")
+                        except ValueError:
+                            print("Invalid input. Please enter a number or 'm' or 'f' or 's'.")
+                            
+            except Exception as e:
+                print(f"Scan error: {e}")
+                
+                # Fallback to manual entry if scan fails
+                custom_addr = input("Enter the device address manually (MAC or UUID): ")
+                if custom_addr:
+                    print(f"Using address: {custom_addr}")
+                    self.device_address = custom_addr
+                    
+                    # Save this address as a known device
+                    device_info = DeviceInfo(address=custom_addr, name="Manual Entry")
+                    device_info.last_connected = int(time.time())
+                    self.add_known_device(device_info)
+                    
+                    return custom_addr
+            
+            print("\nUnable to find a suitable device.")
+            return None
+
+    def show_detailed_device_info(self, devices: List[Tuple[bleak.BLEDevice, DeviceInfo, Any, int]]):
+        """Show detailed information about each device"""
+        print("\nDetailed Device Information:")
+        print("=" * 80)
         
-        print("\nUnable to find PicoCalc device.")
-        return None
+        for i, (device, info, adv_data, scan_count) in enumerate(devices):
+            name = device.name or "Unknown"
+            addr = device.address
+            print(f"Device #{i+1}: {name}")
+            print(f"  Address/UUID: {addr}")
+            print(f"  Signal Strength: {info.rssi if info.rssi else 'N/A'} dBm")
+            print(f"  Detected {scan_count} times during scan")
+            
+            # Show UUIDs if available
+            if hasattr(adv_data, 'service_uuids') and adv_data.service_uuids:
+                uuids = adv_data.service_uuids
+                print("  Services:")
+                for uuid in uuids:
+                    # Highlight Nordic UART Service
+                    if _NUS_UUID.lower() in str(uuid).lower():
+                        print(f"    \033[1m{uuid} (Nordic UART Service)\033[0m")
+                    else:
+                        print(f"    {uuid}")
+            
+            # Show any other advertisement data properties
+            # Display local name if different from device name
+            if hasattr(adv_data, 'local_name') and adv_data.local_name and adv_data.local_name != name:
+                print(f"  Advertised Name: {adv_data.local_name}")
+                
+            # Display manufacturer data if available
+            if hasattr(adv_data, 'manufacturer_data') and adv_data.manufacturer_data:
+                print("  Manufacturer Data:")
+                for company_id, data in adv_data.manufacturer_data.items():
+                    print(f"    Company ID: {company_id}, Data: {data.hex()}")
+            
+            # Show previous connection info if available
+            if info.last_connected > 0:
+                time_ago = self.get_time_ago(info.last_connected)
+                print(f"  Last connected: {time_ago}")
+                
+            print("-" * 80)
+        
+        input("Press Enter to continue...")
+
+
+    def get_time_ago(self, timestamp: int) -> str:
+        """Convert timestamp to human-readable time ago"""
+        now = int(time.time())
+        diff = now - timestamp
+        
+        if diff < 60:
+            return f"{diff} seconds ago"
+        elif diff < 3600:
+            return f"{diff // 60} minutes ago"
+        elif diff < 86400:
+            return f"{diff // 3600} hours ago"
+        else:
+            return f"{diff // 86400} days ago"
     
     async def connect(self, address: str) -> bool:
-        """Connect to PicoCalc with enhanced error handling"""
+        """Connect to PicoCalc with enhanced error handling for both MAC and UUID addresses"""
         try:
             print(f"Connecting to: {address}")
             
@@ -198,34 +498,52 @@ class UpdatedBLEClient:
             self.tx_char = None  # We write to this (RX on the server side)
             self.rx_char = None  # We read from this (TX on the server side)
             
+            # First try to find the Nordic UART Service
             for service in self.client.services:
                 if service.uuid.lower() == _NUS_UUID.lower():
+                    print(f"Found Nordic UART Service: {service.uuid}")
                     for char in service.characteristics:
                         if char.uuid.lower() == _NUS_RX.lower():
                             self.tx_char = char.uuid
-                            print(f"Using {char.uuid} for TX (write)")
+                            print(f"Found RX characteristic: {char.uuid}")
                         
                         if char.uuid.lower() == _NUS_TX.lower():
                             self.rx_char = char.uuid
-                            print(f"Using {char.uuid} for RX (notify)")
+                            print(f"Found TX characteristic: {char.uuid}")
             
             # If we didn't find the NUS service, look for any suitable characteristics
             if not self.tx_char or not self.rx_char:
-                print("Nordic UART Service not found. Looking for any suitable characteristics...")
+                print("Nordic UART Service not found completely. Looking for any suitable characteristics...")
                 
+                # First, try to find characteristics with known UUIDs
                 for service in self.client.services:
                     for char in service.characteristics:
-                        if "write" in char.properties and not self.tx_char:
+                        # Check for RX (write) characteristic
+                        if not self.tx_char and char.uuid.lower() == _NUS_RX.lower():
                             self.tx_char = char.uuid
-                            print(f"Using {char.uuid} for TX (write)")
+                            print(f"Found RX characteristic outside NUS: {char.uuid}")
                         
-                        if "notify" in char.properties and not self.rx_char:
+                        # Check for TX (notify) characteristic
+                        if not self.rx_char and char.uuid.lower() == _NUS_TX.lower():
                             self.rx_char = char.uuid
-                            print(f"Using {char.uuid} for RX (notify)")
+                            print(f"Found TX characteristic outside NUS: {char.uuid}")
+                
+                # If still not found, look for any suitable characteristics by properties
+                if not self.tx_char or not self.rx_char:
+                    print("Looking for characteristics by properties...")
+                    for service in self.client.services:
+                        for char in service.characteristics:
+                            if not self.tx_char and ("write" in char.properties or "write-without-response" in char.properties):
+                                self.tx_char = char.uuid
+                                print(f"Using {char.uuid} for TX (write) based on properties")
+                            
+                            if not self.rx_char and "notify" in char.properties:
+                                self.rx_char = char.uuid
+                                print(f"Using {char.uuid} for RX (notify) based on properties")
             
-            # If we still didn't find anything, fail
+            # If we still didn't find a TX characteristic, fail
             if not self.tx_char:
-                print("Error: No suitable TX characteristic found")
+                print("Error: No suitable TX characteristic found for sending commands")
                 await self.client.disconnect()
                 return False
             
@@ -408,8 +726,10 @@ class UpdatedBLEClient:
             file_size = source.stat().st_size
             print(f"Uploading {source_path} ({file_size:,} bytes) to {dest_path}")
             
-            # Start transfer
-            response = await self.send_command(CMD_FILE_INFO, dest_path.encode('utf-8'))
+            # Start transfer (null-terminate the path so server treats it as a file)
+            response = await self.send_command(
+                CMD_FILE_INFO,
+                dest_path.encode('utf-8'))
             if not response or response[0] != CMD_FILE_INFO or response[1] != 0:
                 print(f"Error: Failed to start transfer. Response: {response.hex() if response else 'None'}")
                 return False
@@ -466,7 +786,11 @@ class UpdatedBLEClient:
         
         try:
             # Send command
-            response = await self.send_command(CMD_MKDIR, path.encode('utf-8'))
+
+            response = await self.send_command(
+                CMD_MKDIR,
+                path.encode('utf-8')
+            )
             
             if not response or response[0] != CMD_MKDIR or response[1] != 0:
                 print("Error: Failed to create directory")
@@ -551,7 +875,10 @@ class UpdatedBLEClient:
             return ""
             
         while True:
-            choice = input("Enter file number to select, or 'c' to change directory: ")
+            choice = input("Enter file number, 'c' to change dir, or 'b' to go back: ").strip().lower()
+
+            if choice == 'b':
+                return ""              # signal “no file picked” → back to main menu
             
             if choice.lower() == 'c':
                 # Option to change local directory
@@ -636,8 +963,8 @@ class UpdatedBLEClient:
 
 async def main():
     print("=== PicoCalc BLE File Transfer ===")
-    print("Modified to work with fixed BLE File Transfer server\n")
-    client = UpdatedBLEClient()
+    print("Enhanced with better device discovery\n")
+    client = EnhancedBLEClient()
     print(f"OS: {platform.system()} {platform.release()} | Python: {platform.python_version()}\n")
 
     # Connect to device
@@ -655,7 +982,7 @@ async def main():
         '2': ("List directory", list_directory),
         '3': ("Create directory", make_directory),
         '4': ("Delete file", delete_file),
-        '5': ("Delete directory", delete_directory),  # New option for directory deletion
+        '5': ("Delete directory", delete_directory),  # Make sure this is the async function
         '6': ("Change directory", change_directory),
         '7': ("Toggle verbose", toggle_verbose),
         'q': ("Quit", None)
@@ -672,6 +999,7 @@ async def main():
         if action:
             label, func = action
             if asyncio.iscoroutinefunction(func):
+                # Fixed: using correct variable 'cur_dir' not 'current_path'
                 result = await func(client, cur_dir)
                 if isinstance(result, str):
                     cur_dir = result  # Updated dir from change_directory
@@ -682,11 +1010,37 @@ async def main():
 
     await client.disconnect()
 
+# Make sure your delete_directory function is defined as async:
+async def delete_directory(client, cur_dir):
+    info = await client.list_directory(cur_dir)
+    dirs = [d for d in info.get('entries', []) if d['type'] == 'directory']
+    if dirs:
+        for i, d in enumerate(dirs, 1):
+            print(f" {i}. {d['name']}")
+        sel = input("Directory # to delete: ")
+        if sel.isdigit():
+            idx = int(sel) - 1
+            if 0 <= idx < len(dirs):
+                dn = dirs[idx]['name']
+                confirm = input(f"Delete directory {dn} and ALL its contents? (y/n): ")
+                if confirm.lower() == 'y':
+                    await client.delete_directory(f"{cur_dir}/{dn}")
+            else:
+                print("Invalid selection.")
+    else:
+        print("No directories found in this directory.")
+
+        
 async def upload_file(client, cur_dir):
     src = await client.select_local_file()
-    if src:
-        dst = input(f"Dest name [{src}]: ") or src
-        await client.upload_file(src, f"{cur_dir}/{dst}")
+    if not src:
+        return
+
+    dst = src
+    print(f"Uploading {src} to {cur_dir}/{dst}")
+    success = await client.upload_file(src, f"{cur_dir}/{dst}")
+    if not success:
+        print("Upload failed.")
 
 async def list_directory(client, cur_dir):
     await client.list_directory(cur_dir)
@@ -702,7 +1056,10 @@ async def delete_file(client, cur_dir):
     if files:
         for i, f in enumerate(files, 1):
             print(f" {i}. {f['name']}")
-        sel = input("File # to delete: ")
+        sel = input("File # to delete, or 'b' to cancel: ").strip().lower()
+        if sel == 'b':
+            print("Delete cancelled.")
+            return
         if sel.isdigit():
             idx = int(sel) - 1
             if 0 <= idx < len(files):
@@ -758,7 +1115,10 @@ async def change_directory(client, _):
         if current_path != "/sd":
             print("  p. Go to parent directory")
 
-        choice = input(f"[In: {current_path}] Select subdirectory # or 'p' for parent or '0' for current: ")
+        choice = input(f"[In: {current_path}] # to enter, 'p' parent, '0' current, or 'b' back: ").strip().lower()
+
+        if choice == 'b':
+            return current_path    # back up one level → main menu’s cur_dir stays the same
         
         if choice == '0':
             return current_path
