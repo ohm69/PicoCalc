@@ -78,6 +78,40 @@ class DeviceInfo:
         )
         device.last_connected = data.get("last_connected", 0)
         return device
+    
+def get_safe_filename(original_filename, max_length=8):
+    """
+    Create a safe filename that won't exceed the BLE packet limits
+    - Preserves the file extension
+    - Shortens the name part if needed
+    - Returns a filename that's safe to use
+    """
+    # Split the filename and extension
+    if '.' in original_filename:
+        name_part, ext_part = original_filename.rsplit('.', 1)
+        ext_part = '.' + ext_part  # Add the dot back
+    else:
+        name_part = original_filename
+        ext_part = ""
+    
+    # Calculate available length for the name part
+    # Allow space for the extension plus a separator
+    available_length = max_length - len(ext_part)
+    
+    # If the name is already short enough, use it as is
+    if len(name_part) <= available_length:
+        return original_filename
+    
+    # Otherwise, truncate the name part
+    # Options:
+    # 1. Simple truncation:
+    shortened_name = name_part[:available_length]
+    
+    # 2. Or use a middle ellipsis approach:
+    # half_length = (available_length - 3) // 2  # -3 for the "..."
+    # shortened_name = name_part[:half_length] + "..." + name_part[-half_length:]
+    
+    return shortened_name + ext_part
 
 class EnhancedBLEClient:
     def __init__(self):
@@ -150,7 +184,7 @@ class EnhancedBLEClient:
                 
                 scanner = BleakScanner(detection_callback=_device_detection_callback)
                 await scanner.start()
-                await asyncio.sleep(10.0)  # Scan for 10 seconds
+                await asyncio.sleep(3.0)  # Scan for 5 seconds
                 await scanner.stop()
                 
                 for device, adv_data in devices_with_adverts:
@@ -714,7 +748,7 @@ class EnhancedBLEClient:
             return {}
     
     async def upload_file(self, source_path: str, dest_path: str) -> bool:
-        """Upload file to PicoCalc"""
+        """Upload file to PicoCalc with filename length safety"""
         try:
             # Ensure source file exists
             source = Path(source_path)
@@ -722,14 +756,23 @@ class EnhancedBLEClient:
                 print(f"Error: Source file not found: {source_path}")
                 return False
             
+            # Shorten the destination filename if needed
+            original_filename = os.path.basename(dest_path)
+            safe_filename = get_safe_filename(original_filename)
+            
+            # Update the destination path if the filename was shortened
+            safe_dest_path = os.path.join(os.path.dirname(dest_path), safe_filename)
+            if safe_filename != original_filename:
+                print(f"Long filename detected, shortened from '{original_filename}' to '{safe_filename}'")
+            
             # Get file size
             file_size = source.stat().st_size
-            print(f"Uploading {source_path} ({file_size:,} bytes) to {dest_path}")
+            print(f"Uploading {source_path} ({file_size:,} bytes) to {safe_dest_path}")
             
-            # Start transfer (null-terminate the path so server treats it as a file)
+            # Start transfer (use safe_dest_path here)
             response = await self.send_command(
                 CMD_FILE_INFO,
-                dest_path.encode('utf-8'))
+                safe_dest_path.encode('utf-8'))
             if not response or response[0] != CMD_FILE_INFO or response[1] != 0:
                 print(f"Error: Failed to start transfer. Response: {response.hex() if response else 'None'}")
                 return False
@@ -767,7 +810,7 @@ class EnhancedBLEClient:
                 print(f"Response: {response.hex() if response else 'None'}")
                 return False
             
-            # If we have the byte count in the response, display it
+            # Display byte count if available
             if len(response) >= 6:
                 total_bytes = struct.unpack("<I", response[2:6])[0]
                 print(f"\nTransfer complete: {total_bytes:,} bytes")
@@ -779,6 +822,7 @@ class EnhancedBLEClient:
         except Exception as e:
             print(f"\nError uploading file: {e}")
             return False
+
     
     async def make_directory(self, path: str) -> bool:
         """Create a directory"""

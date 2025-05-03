@@ -24,7 +24,7 @@ except ImportError:
 
 # Configuration settings
 DEBUG_MODE = False  # Set to False to disable debug messages
-CHUNK_SIZE = 240     # Can be increased for better performance if supported by host
+CHUNK_SIZE = 99     # Can be increased for better performance if supported by host
 MAX_RETRIES = 3     # Number of retries for operations
 
 # Define constants for BLE operation
@@ -272,6 +272,7 @@ def cleanup_transfer():
     
     current_path = ""
     bytes_received = 0
+    current_file = None
     
     # Run garbage collection to free memory
     gc.collect()
@@ -368,11 +369,45 @@ def start_file_transfer(path):
     global current_file, current_path, bytes_received, conn_handle, tx_handle
     
     debug_print(f"Starting file transfer to: {path}")
+
+    try:
+            ensure_directory_exists(path)
+
+            try:
+                stat_result = os.stat(path)
+                file_size = stat_result[6]  # Size is at index 6
+                print(f"Found existing file: {path}, size: {file_size} bytes")
+            except OSError:
+                print(f"No existing file at {path}")
+
+            try:
+                os.remove(path)
+                print(f"Successfully removed file: {path}")
+                cleanup_transfer()
+                print("I had to do some cleanup first")
+            except OSError as e:
+                # File doesn't exist, which is fine
+                print(f"Could not remove file ({e}), continuing...")
+                pass
+
+    except OSError as e:
+        debug_print(f"File open error ({path}): {e}")
+
+        try:
+            # Check directory contents and permissions
+            dir_path = os.path.dirname(path)
+            print(f"Directory contents of {dir_path}:")
+            print(os.listdir(dir_path))
+        except Exception as list_err:
+            print(f"Could not list directory contents: {list_err}")
+
+        send_error_response(CMD_FILE_INFO, f"Permission error: {e}")
+        cleanup_transfer()
     
     try:
         # Check if a transfer is already in progress
         if current_file:
-            debug_print("Error: Transfer already in progress")
+            debug_print(f"Error: Transfer already in progress with {current_file} and {path}")
             send_error_response(CMD_FILE_INFO, "Transfer already in progress")
             return
         
@@ -392,6 +427,7 @@ def start_file_transfer(path):
         response = bytearray([CMD_FILE_INFO, 0])  # Success
         try:
             ble.gatts_notify(conn_handle, tx_handle, response)
+
         except Exception as e:
             debug_print(f"Error sending response: {e}")
             cleanup_transfer()
