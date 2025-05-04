@@ -44,6 +44,7 @@ CMD_DELETE_DIR = 7  # Command for directory deletion
 
 # Chunk size for file transfer
 CHUNK_SIZE = 20  # Match server chunk size
+MAX_DEST_PATH_LENGTH = 64
 
 # Config file for storing device preferences
 CONFIG_FILE = "picocalc_client_config.json"
@@ -79,7 +80,7 @@ class DeviceInfo:
         device.last_connected = data.get("last_connected", 0)
         return device
     
-def get_safe_filename(original_filename, max_length=8):
+def get_safe_filename(original_filename, max_length=6):
     """
     Create a safe filename that won't exceed the BLE packet limits
     - Preserves the file extension
@@ -747,78 +748,67 @@ class EnhancedBLEClient:
             print(f"Error listing directory: {e}")
             return {}
     
+
+    #
     async def upload_file(self, source_path: str, dest_path: str) -> bool:
-        """Upload file to PicoCalc with filename length safety"""
+        """
+        Simplified upload_file:
+        - Uses get_safe_filename() to generate a safe short name
+        - Avoids creating temporary files
+        - Uploads directly using the original file
+        """
         try:
-            # Ensure source file exists
             source = Path(source_path)
             if not source.exists():
                 print(f"Error: Source file not found: {source_path}")
                 return False
-            
-            # Shorten the destination filename if needed
+
             original_filename = os.path.basename(dest_path)
-            safe_filename = get_safe_filename(original_filename)
-            
-            # Update the destination path if the filename was shortened
-            safe_dest_path = os.path.join(os.path.dirname(dest_path), safe_filename)
+            safe_filename = get_safe_filename(original_filename, max_length=16)
+
             if safe_filename != original_filename:
-                print(f"Long filename detected, shortened from '{original_filename}' to '{safe_filename}'")
-            
-            # Get file size
+                print(f"Long filename detected. Using safe filename '{safe_filename}'")
+
+            upload_dest_path = f"{self.current_path}/{safe_filename}"
+
+            if len(upload_dest_path.encode('utf-8')) > MAX_DEST_PATH_LENGTH:
+                print(f"Error: Full destination path too long ({len(upload_dest_path)} chars)")
+                print("Try uploading to a directory with a shorter path or shorten the filename.")
+                return False
+
             file_size = source.stat().st_size
-            print(f"Uploading {source_path} ({file_size:,} bytes) to {safe_dest_path}")
-            
-            # Start transfer (use safe_dest_path here)
-            response = await self.send_command(
-                CMD_FILE_INFO,
-                safe_dest_path.encode('utf-8'))
+            print(f"Uploading {source} ({file_size:,} bytes) to {upload_dest_path}")
+
+            # Start transfer
+            response = await self.send_command(CMD_FILE_INFO, upload_dest_path.encode('utf-8'))
             if not response or response[0] != CMD_FILE_INFO or response[1] != 0:
                 print(f"Error: Failed to start transfer. Response: {response.hex() if response else 'None'}")
                 return False
-            
-            # Open file and send in chunks
-            with open(source_path, "rb") as f:
+
+            with open(source, "rb") as f:
                 bytes_sent = 0
-                
                 while True:
                     chunk = f.read(CHUNK_SIZE)
                     if not chunk:
                         break
-                    
-                    # Send chunk
                     response = await self.send_command(CMD_FILE_DATA, chunk)
                     if not response or response[0] != CMD_FILE_DATA or response[1] != 0:
                         print(f"\nError: Failed to send data chunk at {bytes_sent} bytes")
-                        print(f"Response: {response.hex() if response else 'None'}")
                         return False
-                    
                     bytes_sent += len(chunk)
-                    
-                    # Calculate and show progress
                     progress = min(100, int(100 * bytes_sent / file_size))
-                    progress_bar = "█" * (progress // 5) + "░" * (20 - progress // 5)
-                    print(f"\rProgress: [{progress_bar}] {progress}% ({bytes_sent:,}/{file_size:,} bytes)", end="")
-                    
-                    # Brief delay to prevent overwhelming the device
+                    bar = "█" * (progress // 5) + "░" * (20 - progress // 5)
+                    print(f"\rProgress: [{bar}] {progress}% ({bytes_sent:,}/{file_size:,} bytes)", end="")
                     await asyncio.sleep(0.05)
-            
-            # End transfer
+
             response = await self.send_command(CMD_FILE_END)
             if not response or response[0] != CMD_FILE_END or response[1] != 0:
                 print("\nError: Failed to end transfer")
-                print(f"Response: {response.hex() if response else 'None'}")
                 return False
-            
-            # Display byte count if available
-            if len(response) >= 6:
-                total_bytes = struct.unpack("<I", response[2:6])[0]
-                print(f"\nTransfer complete: {total_bytes:,} bytes")
-            else:
-                print("\nTransfer complete!")
-            
+
+            print("\nTransfer complete!")
             return True
-            
+
         except Exception as e:
             print(f"\nError uploading file: {e}")
             return False
