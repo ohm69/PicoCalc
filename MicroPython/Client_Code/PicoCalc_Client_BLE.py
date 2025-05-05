@@ -25,7 +25,7 @@ except ImportError:
     sys.exit(1)
 
 # Default device name patterns to look for
-DEVICE_NAME_PATTERNS = ["PicoCalc", "PicoCalc-BLE", "PicoCalc-Test"]
+DEVICE_NAME_PATTERNS = ["PicoCalc", "PicoCalc-BLE", "PicoCalc", "PicoCalc_"]
 
 # UUIDs for Nordic UART Service
 _NUS_UUID = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"

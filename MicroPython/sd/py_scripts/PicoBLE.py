@@ -28,8 +28,13 @@ CHUNK_SIZE = 99     # Can be increased for better performance if supported by ho
 MAX_RETRIES = 3     # Number of retries for operations
 
 # Define constants for BLE operation
+def get_device_name():
+    mac = bluetooth.BLE().config('mac')[1]
+    suffix = ''.join('%02X' % b for b in mac[-2:])
+    return f"PicoCalc_{suffix}"
+
 _ADV_INTERVAL_MS = const(250)
-_DEVICE_NAME = "PicoCalc-BLE"
+
 
 # Command codes
 CMD_NONE = const(0)
@@ -611,7 +616,7 @@ def ble_irq(event, data):
         if not shutdown_requested:
             try:
                 debug_print("Restarting advertising")
-                ble.gap_advertise(100000, adv_data=get_adv_payload())
+                ble.gap_advertise(100000, adv_data=get_adv_payload(device_name))
             except Exception as e:
                 debug_print(f"Failed to restart advertising: {e}")
         
@@ -682,7 +687,7 @@ def process_command(data):
     else:
         debug_print(f"Unknown command: {command}")
 
-def get_adv_payload():
+def get_adv_payload(name):
     """Generate a BLE advertisement payload for the Nordic UART Service"""
     # Helper function for simple advertising
     def advertising_payload(limited_disc=False, br_edr=False, name=None, services=None, appearance=0):
@@ -712,7 +717,7 @@ def get_adv_payload():
 
         return payload
     
-    return advertising_payload(name=_DEVICE_NAME, services=[_NUS_UUID])
+    return advertising_payload(name=name, services=[_NUS_UUID])
 
 def check_sd_card():
     """Check if SD card is properly mounted"""
@@ -732,6 +737,13 @@ def init_bluetooth():
         # Create BLE instance
         ble = bluetooth.BLE()
         ble.active(True)
+        global device_name
+        # Dynamically generate device name from MAC address
+        mac = ble.config('mac')[1]
+        suffix = ''.join('%02X' % b for b in mac[-2:])
+        device_name = f"PicoCalc_{suffix}"
+        ble.config(gap_name=device_name)
+
         
         # Register services
         # Nordic UART Service (NUS)
@@ -756,8 +768,8 @@ def init_bluetooth():
         # Start advertising
         try:
             # This is the standard way to advertise
-            ble.gap_advertise(100000, adv_data=get_adv_payload())
-            debug_print(f"Advertising as {_DEVICE_NAME}")
+            ble.gap_advertise(100000, adv_data=get_adv_payload(device_name))
+            debug_print(f"Advertising as {device_name}")
         except Exception as e:
             debug_print(f"Error starting advertising: {e}")
             raise
