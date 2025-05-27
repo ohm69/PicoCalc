@@ -16,10 +16,49 @@ def find_py_files(base_path="/sd"):
                     relative_path = full_path[len("/sd/"):-3]  # remove /sd/ and .py
                     py_files.append(relative_path)
             except Exception as e:
-                print(f"⚠️ Error reading {full_path}: {e}")
+                print(f"Error reading {full_path}: {e}")
     except Exception as e:
-        print(f"⚠️ Error listing {base_path}: {e}")
+        print(f"Error listing {base_path}: {e}")
     return py_files
+
+def delete_file(script_path, base_path="/sd"):
+    """Delete a file with confirmation"""
+    try:
+        full_path = f"{base_path}/{script_path}.py"
+        
+        # Check if file exists
+        try:
+            os.stat(full_path)
+        except OSError:
+            print(f"File not found: {script_path}.py")
+            return False
+        
+        # Show file info before deletion
+        try:
+            stat = os.stat(full_path)
+            size = stat[6]  # file size
+            print(f"\nFile: {script_path}.py")
+            print(f"Size: {size} bytes")
+            print(f"Path: {full_path}")
+        except:
+            pass
+        
+        # Confirmation prompt
+        print(f"\nAre you sure you want to delete '{script_path}.py'?")
+        print("This action cannot be undone!")
+        confirm = input("Delete file? (y/N): ").strip().lower()
+        
+        if confirm == "y":
+            os.remove(full_path)
+            print(f"File '{script_path}.py' has been deleted.")
+            return True
+        else:
+            print("Deletion cancelled.")
+            return False
+            
+    except Exception as e:
+        print(f"Error deleting {script_path}: {e}")
+        return False
 
 def run_script(script_path, base_path="/sd"):
     try:
@@ -47,12 +86,12 @@ def run_script(script_path, base_path="/sd"):
         # (which might happen with guard statements), call it
         if 'main_menu' in script_globals and callable(script_globals['main_menu']):
             if 'main_executed' not in script_globals or not script_globals['main_executed']:
-                print("🔄 No entry point called, executing main_menu()...")
+                print("No entry point called, executing main_menu()...")
                 script_globals['main_menu']()
                 script_globals['main_executed'] = True
                 
     except Exception as e:
-        print(f"❌ Failed running {script_path}: {e}")
+        print(f"Failed running {script_path}: {e}")
 
 def flush_modules(exclude=("os", "sys", "gc")):
     flushed = []
@@ -60,7 +99,7 @@ def flush_modules(exclude=("os", "sys", "gc")):
         if name not in exclude and not name.startswith("micropython"):
             sys.modules.pop(name, None)
             flushed.append(name)
-    print(f"🧹 Flushed: {', '.join(flushed)}")
+    print(f"Flushed: {', '.join(flushed)}")
 
 def show_memory():
     gc.collect()
@@ -95,7 +134,49 @@ def show_memory():
         print(f"Free:  {format_bytes(free_space)}")
         print(f"Usage: {used_space / total_space * 100:.1f}%")
     except Exception as e:
-        print(f"⚠️ Error getting storage info: {e}")
+        print(f"Error getting storage info: {e}")
+
+def file_management_menu():
+    """Sub-menu for file management operations"""
+    while True:
+        scripts = find_py_files()
+        if not scripts:
+            print("No Python files found.")
+            input("Press Enter to return to main menu...")
+            return
+        
+        print("\n=== File Management ===")
+        for i, name in enumerate(scripts):
+            print(f"{i + 1}: {name}.py")
+        
+        print("\nFile Operations:")
+        print("D: Delete a file")
+        print("B: Back to main menu")
+        
+        choice = input("\nEnter choice: ").strip().lower()
+        
+        if choice == "b":
+            return
+        elif choice == "d":
+            print("\nSelect file to delete:")
+            for i, name in enumerate(scripts):
+                print(f"{i + 1}: {name}.py")
+            
+            delete_choice = input("\nEnter file number to delete: ").strip()
+            try:
+                index = int(delete_choice) - 1
+                if 0 <= index < len(scripts):
+                    delete_file(scripts[index])
+                    input("Press Enter to continue...")
+                else:
+                    print("Invalid selection.")
+                    input("Press Enter to continue...")
+            except ValueError:
+                print("Invalid input. Please enter a number.")
+                input("Press Enter to continue...")
+        else:
+            print("Invalid choice.")
+            input("Press Enter to continue...")
 
 def main_menu():
     while True:
@@ -104,16 +185,20 @@ def main_menu():
         for i, name in enumerate(scripts):
             print(f"{i + 1}: Run {name}")
         
+        print("\nOptions:")
         print("X: Exit to prompt")
         print("R: Reload menu")
         print("F: Flush & reload modules")
         print("M: Memory status")
+        print("T: File management")
+        
         choice = input("\nEnter choice: ").strip().lower()
+        
         if choice == "x":
-            print("👋 Exiting to prompt.")
+            print("Exiting to prompt.")
             return
         elif choice == "r":
-            print("🔁 Reloading menu...")
+            print("Reloading menu...")
             continue
         elif choice == "f":
             flush_modules()
@@ -121,17 +206,20 @@ def main_menu():
         elif choice == "m":
             show_memory()
             continue
+        elif choice == "t":
+            file_management_menu()
+            continue
         else:
             try:
                 index = int(choice) - 1
                 if 0 <= index < len(scripts):
-                    print(f"\n▶️ Running {scripts[index]}...\n")
+                    print(f"\nRunning {scripts[index]}...\n")
                     run_script(scripts[index])
-                    input("\n✅ Done. Press Enter to return to menu...")
+                    input("\nDone. Press Enter to return to menu...")
                 else:
-                    print("❌ Invalid selection.")
+                    print("Invalid selection.")
             except ValueError:
-                print("❌ Invalid input. Use number or option letter.")
+                print("Invalid input. Use number or option letter.")
                 
 # This helper variable will let us know if the main entry point was executed
 main_executed = False
