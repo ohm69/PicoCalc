@@ -14,16 +14,55 @@ A MicroPython firmware and script collection for the Clockwork Pi PicoCalc handh
 
 ```
 MicroPython/
-├── boot.py
-├── firmware/              ← prebuilt UF2 firmware images
-├── modules/               ← custom MicroPython modules
-│   ├── picocalcdisplay/   ← display driver & graphics primitives
-│   ├── pico_keyboard.py   ← keyboard-scanning routines
-│   ├── sdcard.py          ← SD-card mounting & I/O
-│   └── vtterminal/        ← VT100‐style terminal emulator
+├── boot.py                     ← main boot script
+├── Client_Code/                ← BLE client applications
+│   └── PicoCalc_Client_BLE.py
+├── firmware/                   ← prebuilt UF2 firmware images
+│   └── picocalc_micropython_pico2w.uf2
+├── modules/                    ← custom MicroPython modules
+│   ├── checksd.py             ← SD card verification
+│   ├── colorer.py             ← syntax highlighting
+│   ├── default_style.py       ← default color schemes
+│   ├── enhanced_sd.py         ← enhanced SD operations
+│   ├── flush.py               ← module flushing utilities
+│   ├── highlighter.py         ← code highlighting
+│   ├── mkdir.py               ← directory creation
+│   ├── picocalc.py            ← main PicoCalc module
+│   ├── picocalc_system.py     ← system utilities
+│   ├── py_run.py              ← script execution
+│   ├── pye.py                 ← text editor
+│   ├── sdcard.py              ← SD card operations
+│   └── vt.py                  ← terminal emulation
+├── picocalcdisplay/            ← display driver & graphics
+│   ├── font6x8e500.h
+│   ├── micropython.cmake
+│   ├── micropython.mk
+│   ├── picocalcdisplay.c
+│   └── picocalcdisplay.h
 ├── sd/
-│   └── py_scripts/        ← example scripts (synth, sim, test, …)
-└── README.md              ← you are here
+│   └── py_scripts/             ← application scripts
+│       ├── PicoBLE.py          ← Bluetooth functionality
+│       ├── ProxiScan.py        ← proximity scanning
+│       ├── ProxiScan_2.0.py    ← enhanced proximity scan
+│       ├── ProxiScan_3.0.py    ← latest proximity scan
+│       ├── WiFiManager.py      ← WiFi management
+│       ├── brad.py             ← custom application
+│       ├── flush_menu.py       ← menu flushing utility
+│       ├── picocalc_ollama.py  ← Ollama integration
+│       ├── sd_chk.py           ← SD card checker
+│       ├── sim.py              ← simulator
+│       ├── start_ollama.sh     ← Ollama startup script
+│       ├── synth.py            ← synthesizer engine
+│       ├── test_script.py      ← test routines
+│       └── tetris.py           ← Tetris game
+├── sd_chk.py                   ← SD check utility
+├── vtterminal/                 ← VT100 terminal emulator
+│   ├── font6x8.h
+│   ├── micropython.cmake
+│   ├── micropython.mk
+│   ├── vtterminal.c
+│   └── vtterminal.h
+└── README.md                   ← you are here
 ```
 
 ---

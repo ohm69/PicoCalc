@@ -80,39 +80,59 @@ class DeviceInfo:
         device.last_connected = data.get("last_connected", 0)
         return device
     
-def get_safe_filename(original_filename, max_length=6):
+def get_safe_filename(original_filename, max_total_path=20):
     """
-    Create a safe filename that won't exceed the BLE packet limits
-    - Preserves the file extension
-    - Shortens the name part if needed
-    - Returns a filename that's safe to use
+    Create a very short filename that fits BLE packet limits
+    - Uses single character + extension for maximum compatibility
+    - Ensures path stays under BLE packet limits
     """
+    import hashlib
+    
     # Split the filename and extension
     if '.' in original_filename:
         name_part, ext_part = original_filename.rsplit('.', 1)
-        ext_part = '.' + ext_part  # Add the dot back
+        # Keep full extension - don't truncate it
+        ext_part = '.' + ext_part
     else:
         name_part = original_filename
         ext_part = ""
     
-    # Calculate available length for the name part
-    # Allow space for the extension plus a separator
-    available_length = max_length - len(ext_part)
+    # Calculate maximum filename length
+    # Path format: /sd/py_scripts/filename (15 chars + filename)
+    base_path_length = 15  # len("/sd/py_scripts/")
+    max_filename_length = max_total_path - base_path_length
     
-    # If the name is already short enough, use it as is
-    if len(name_part) <= available_length:
+    # If the filename is already short enough, use it as is
+    if len(original_filename) <= max_filename_length:
         return original_filename
     
-    # Otherwise, truncate the name part
-    # Options:
-    # 1. Simple truncation:
-    shortened_name = name_part[:available_length]
+    # Create single letter + hash for very short names
+    hash_obj = hashlib.md5(name_part.encode())
     
-    # 2. Or use a middle ellipsis approach:
-    # half_length = (available_length - 3) // 2  # -3 for the "..."
-    # shortened_name = name_part[:half_length] + "..." + name_part[-half_length:]
+    # Calculate how much space we have for the name part
+    available_for_name = max_filename_length - len(ext_part)
     
-    return shortened_name + ext_part
+    # Always preserve extension if possible
+    if available_for_name >= 1 and ext_part:
+        # First letter + extension
+        first_letter = name_part[0].lower() if name_part else 'f'
+        new_name = first_letter + ext_part
+        
+        # If we have room, add a hash character
+        if available_for_name >= 2:
+            hash_char = hash_obj.hexdigest()[0]
+            new_name = first_letter + hash_char + ext_part
+    else:
+        # No extension or no room for extension
+        if max_filename_length >= 5:
+            # Use hash + generic extension
+            hash_part = hash_obj.hexdigest()[:3]
+            new_name = hash_part + ".tmp"
+        else:
+            # Very constrained, just use hash
+            new_name = hash_obj.hexdigest()[:max_filename_length]
+    
+    return new_name
 
 class EnhancedBLEClient:
     def __init__(self):
@@ -127,6 +147,7 @@ class EnhancedBLEClient:
         self.known_devices = self.load_known_devices()
         self.scan_timeout = 15.0  # Scan timeout in seconds
         self.quick_mode = False  # Quick mode for simplified uploads
+        self.original_filename = None  # Store original filename for server rename
         
     def load_known_devices(self) -> Dict[str, DeviceInfo]:
         """Load known devices from config file"""
@@ -753,10 +774,10 @@ class EnhancedBLEClient:
     #
     async def upload_file(self, source_path: str, dest_path: str) -> bool:
         """
-        Simplified upload_file:
-        - Uses get_safe_filename() to generate a safe short name
-        - Avoids creating temporary files
-        - Uploads directly using the original file
+        Enhanced upload_file with temporary filename and server-side rename:
+        - Uses short temp name for BLE transfer
+        - Sends original filename to server for final rename
+        - Preserves original filename on the server
         """
         try:
             source = Path(source_path)
@@ -764,13 +785,22 @@ class EnhancedBLEClient:
                 print(f"Error: Source file not found: {source_path}")
                 return False
 
+            # Extract directory and filename from dest_path
+            dest_dir = os.path.dirname(dest_path)
             original_filename = os.path.basename(dest_path)
-            safe_filename = get_safe_filename(original_filename, max_length=16)
-
+            safe_filename = get_safe_filename(original_filename, max_total_path=20)
+            
+            # Create temp path for transfer
+            temp_upload_path = f"{dest_dir}/{safe_filename}" if dest_dir else safe_filename
+            
+            # Store original filename for server rename
+            self.original_filename = original_filename
+            
             if safe_filename != original_filename:
-                print(f"Long filename detected. Using safe filename '{safe_filename}'")
+                print(f"Using temporary filename '{safe_filename}' for transfer")
+                print(f"Will rename to '{original_filename}' on server after upload")
 
-            upload_dest_path = f"{self.current_path}/{safe_filename}"
+            upload_dest_path = temp_upload_path
 
             if len(upload_dest_path.encode('utf-8')) > MAX_DEST_PATH_LENGTH:
                 print(f"Error: Full destination path too long ({len(upload_dest_path)} chars)")
@@ -802,12 +832,20 @@ class EnhancedBLEClient:
                     print(f"\rProgress: [{bar}] {progress}% ({bytes_sent:,}/{file_size:,} bytes)", end="")
                     await asyncio.sleep(0.05)
 
-            response = await self.send_command(CMD_FILE_END)
+            # Send file end command with original filename for server rename
+            original_filename_data = b''
+            if hasattr(self, 'original_filename') and self.original_filename and self.original_filename != safe_filename:
+                original_filename_data = self.original_filename.encode('utf-8')
+            
+            response = await self.send_command(CMD_FILE_END, original_filename_data)
             if not response or response[0] != CMD_FILE_END or response[1] != 0:
                 print("\nError: Failed to end transfer")
                 return False
 
-            print("\nTransfer complete!")
+            if original_filename_data:
+                print(f"\nTransfer complete! File renamed to '{self.original_filename}' on server")
+            else:
+                print("\nTransfer complete!")
             return True
 
         except Exception as e:

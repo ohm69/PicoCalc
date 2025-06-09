@@ -79,9 +79,22 @@ bytes_received = 0
 # Default upload directory for Python scripts
 DEFAULT_SCRIPT_DIR = "/sd/py_scripts"
 
+# Color definitions (4-bit grayscale for PicoCalc display)
+COLOR_BLACK = 0
+COLOR_DARK_GRAY = 4
+COLOR_GRAY = 8
+COLOR_LIGHT_GRAY = 12
+COLOR_WHITE = 15
+
+# BLE status colors
+COLOR_CONNECTED = COLOR_WHITE
+COLOR_TRANSFER = COLOR_LIGHT_GRAY
+COLOR_SUCCESS = COLOR_WHITE
+COLOR_ERROR = COLOR_GRAY
+
 # Activity indicator
 activity_dots = 0
-activity_color = 0x07E0  # Green
+activity_color = COLOR_SUCCESS
 next_activity_update = 0
 
 # Exit flag for keyboard interrupt
@@ -94,18 +107,18 @@ def show_idle():
     d = picocalc.display
     if not d or shutdown_requested:
         return
-    d.fill(0)
+    d.fill(COLOR_BLACK)
     # 1) Bouncing red square across the top
     span = 200
     x = idle_frame % (span * 2)
     if x > span:
         x = 2 * span - x
-    d.fill_rect(10 + x, 20, 12, 12, 0xF800)
+    d.fill_rect(10 + x, 20, 12, 12, COLOR_LIGHT_GRAY)
     # 2) Breathing cyan bar underneath
     bar_w = ((idle_frame % 20) * 4) + 4
-    d.fill_rect(10, 50, bar_w, 4, 0x07FF)
+    d.fill_rect(10, 50, bar_w, 4, COLOR_GRAY)
     # 3) Flickering “Ready” text that swaps red/green
-    col = 0xF800 if (idle_frame % 10) < 5 else 0x07E0
+    col = COLOR_WHITE if (idle_frame % 10) < 5 else COLOR_LIGHT_GRAY
     d.text("Ready", 10, 100, col)
     d.show()
     idle_frame += 1
@@ -146,7 +159,7 @@ def update_display(message, color=None, show_activity=False, clear=True):
         
     if clear:
         # Clear display
-        picocalc.display.fill(0)
+        picocalc.display.fill(COLOR_BLACK)
     
     # Update activity if needed
     if show_activity:
@@ -159,29 +172,29 @@ def update_display(message, color=None, show_activity=False, clear=True):
         indicator = get_activity_indicator()
         picocalc.display.text(f"BLE File Transfer {indicator}", 10, 10, activity_color)
     else:
-        picocalc.display.text("BLE File Transfer", 10, 10, 1)
+        picocalc.display.text("BLE File Transfer", 10, 10, COLOR_WHITE)
     
     # Split message lines
     if message:
         lines = message.split('\n')
         y = 40
         for line in lines:
-            display_color = color if color else 1
+            display_color = color if color else COLOR_WHITE
             picocalc.display.text(line, 20, y, display_color)
             y += 20
     
     # Show info
     if is_connected:
-        picocalc.display.text("Status: Connected", 10, 240, 0x07E0)  # Green
+        picocalc.display.text("Status: Connected", 10, 240, COLOR_SUCCESS)
     else:
-        picocalc.display.text("Status: Waiting for connection", 10, 240, 0x001F)  # Blue
+        picocalc.display.text("Status: Waiting for connection", 10, 240, COLOR_TRANSFER)
     
     # Memory info
     free_mem = gc.mem_free()
-    picocalc.display.text(f"Memory: {free_mem // 1024}K free", 10, 260, 1)
+    picocalc.display.text(f"Memory: {free_mem // 1024}K free", 10, 260, COLOR_GRAY)
     
     # Instructions
-    picocalc.display.text("Press ESC to exit", 10, 280, 0xF800)  # Red
+    picocalc.display.text("Press ESC to exit", 10, 280, COLOR_ERROR)
     
     # Show the display
     picocalc.display.show()
@@ -192,17 +205,17 @@ def update_display_progress():
         return
     
     # Clear display
-    picocalc.display.fill(0)
+    picocalc.display.fill(COLOR_BLACK)
     
     # Title with activity indicator
     update_activity()
     indicator = get_activity_indicator()
-    picocalc.display.text(f"File Transfer {indicator}", 10, 10, 0x001F)  # Blue
+    picocalc.display.text(f"File Transfer {indicator}", 10, 10, COLOR_TRANSFER)
     
     # File info
     filename = current_path.split('/')[-1]
-    picocalc.display.text(f"File: {filename[:20]}", 10, 40, 1)
-    picocalc.display.text(f"Bytes: {bytes_received}", 10, 60, 1)
+    picocalc.display.text(f"File: {filename[:20]}", 10, 40, COLOR_WHITE)
+    picocalc.display.text(f"Bytes: {bytes_received}", 10, 60, COLOR_WHITE)
     
     # Progress bar
     bar_x = 20
@@ -211,29 +224,29 @@ def update_display_progress():
     bar_height = 30
     
     # Draw border
-    picocalc.display.rect(bar_x, bar_y, bar_width, bar_height, 1)
+    picocalc.display.rect(bar_x, bar_y, bar_width, bar_height, COLOR_WHITE)
     
     # Draw progress (adapt max visual based on file size)
     max_visual = max(100 * 1024, bytes_received * 1.2)  # Dynamic scale based on current size
     progress = min(1.0, bytes_received / max_visual)
     fill_width = int(progress * (bar_width - 4))
     if fill_width > 0:
-        picocalc.display.fill_rect(bar_x + 2, bar_y + 2, fill_width, bar_height - 4, 0x07E0)  # Green
+        picocalc.display.fill_rect(bar_x + 2, bar_y + 2, fill_width, bar_height - 4, COLOR_SUCCESS)
     
     # Progress percentage
     percent = min(100, int(progress * 100))
-    picocalc.display.text(f"{percent}%", bar_x + bar_width // 2 - 10, bar_y + bar_height + 10, 1)
+    picocalc.display.text(f"{percent}%", bar_x + bar_width // 2 - 10, bar_y + bar_height + 10, COLOR_WHITE)
     
     # Memory info
     free_mem = gc.mem_free()
-    picocalc.display.text(f"Memory: {free_mem // 1024}K free", 10, 180, 1)
+    picocalc.display.text(f"Memory: {free_mem // 1024}K free", 10, 180, COLOR_GRAY)
     
     # Instructions
-    picocalc.display.text("Press ESC to cancel", 10, 280, 0xF800)  # Red
+    picocalc.display.text("Press ESC to cancel", 10, 280, COLOR_ERROR)
     
     # Show target directory
     if current_path.startswith(DEFAULT_SCRIPT_DIR):
-        picocalc.display.text("Target: py_scripts", 10, 200, 0x07E0)  # Green
+        picocalc.display.text("Target: py_scripts", 10, 200, COLOR_SUCCESS)
     
     # Show the display
     picocalc.display.show()
@@ -345,7 +358,7 @@ def list_directory(path):
         
         # Send response in chunks
         send_chunked_data(response)
-        update_display(f"Listed directory: {path}", color=0x07E0, show_activity=True)
+        update_display(f"Listed directory: {path}", color=COLOR_SUCCESS, show_activity=True)
         
     except Exception as e:
         debug_print(f"Error listing directory: {e}")
@@ -391,40 +404,6 @@ def start_file_transfer(path):
     debug_print(f"Starting file transfer to: {path}")
 
     try:
-            ensure_directory_exists(path)
-
-            try:
-                stat_result = os.stat(path)
-                file_size = stat_result[6]  # Size is at index 6
-                print(f"Found existing file: {path}, size: {file_size} bytes")
-            except OSError:
-                print(f"No existing file at {path}")
-
-            try:
-                os.remove(path)
-                print(f"Successfully removed file: {path}")
-                cleanup_transfer()
-                print("I had to do some cleanup first")
-            except OSError as e:
-                # File doesn't exist, which is fine
-                print(f"Could not remove file ({e}), continuing...")
-                pass
-
-    except OSError as e:
-        debug_print(f"File open error ({path}): {e}")
-
-        try:
-            # Check directory contents and permissions
-            dir_path = os.path.dirname(path)
-            print(f"Directory contents of {dir_path}:")
-            print(os.listdir(dir_path))
-        except Exception as list_err:
-            print(f"Could not list directory contents: {list_err}")
-
-        send_error_response(CMD_FILE_INFO, f"Permission error: {e}")
-        cleanup_transfer()
-    
-    try:
         # Check if a transfer is already in progress
         if current_file:
             debug_print(f"Error: Transfer already in progress with {current_file} and {path}")
@@ -434,6 +413,19 @@ def start_file_transfer(path):
         # Ensure path starts with /sd
         if not path.startswith("/sd"):
             path = "/sd/" + path.lstrip('/')
+        
+        # Check for existing file and remove if needed
+        try:
+            stat_result = os.stat(path)
+            file_size = stat_result[6]  # Size is at index 6
+            print(f"Found existing file: {path}, size: {file_size} bytes")
+            try:
+                os.remove(path)
+                print(f"Successfully removed existing file: {path}")
+            except OSError as e:
+                print(f"Could not remove existing file ({e}), continuing...")
+        except OSError:
+            print(f"No existing file at {path}")
             
         # Ensure directory exists
         ensure_directory_exists(path)
@@ -445,16 +437,9 @@ def start_file_transfer(path):
         
         # Send response
         response = bytearray([CMD_FILE_INFO, 0])  # Success
-        try:
-            ble.gatts_notify(conn_handle, tx_handle, response)
-
-        except Exception as e:
-            debug_print(f"Error sending response: {e}")
-            cleanup_transfer()
-            send_error_response(CMD_FILE_INFO)
-            return
+        ble.gatts_notify(conn_handle, tx_handle, response)
         
-        update_display(f"Receiving file:\n{path.split('/')[-1]}", color=0x001F, show_activity=True)
+        update_display(f"Receiving file:\n{path.split('/')[-1]}", color=COLOR_TRANSFER, show_activity=True)
         
     except Exception as e:
         debug_print(f"Error starting file transfer: {e}")
@@ -488,8 +473,8 @@ def receive_file_data(data):
         send_error_response(CMD_FILE_DATA)
         cleanup_transfer()
 
-def end_file_transfer():
-    """End file transfer"""
+def end_file_transfer(original_filename_data=b''):
+    """End file transfer and optionally rename to original filename"""
     global current_file, current_path, bytes_received, conn_handle, tx_handle
     
     try:
@@ -501,6 +486,33 @@ def end_file_transfer():
         # Close file
         current_file.close()
         
+        # Handle rename if original filename provided
+        final_path = current_path
+        if original_filename_data:
+            try:
+                original_filename = original_filename_data.decode('utf-8')
+                # Get directory from current path
+                directory = '/'.join(current_path.split('/')[:-1])
+                new_path = f"{directory}/{original_filename}"
+                
+                debug_print(f"Renaming {current_path} to {new_path}")
+                
+                # Remove existing file with same name if it exists
+                try:
+                    os.remove(new_path)
+                    debug_print(f"Removed existing file: {new_path}")
+                except OSError:
+                    pass  # File doesn't exist, which is fine
+                
+                # Rename the file
+                os.rename(current_path, new_path)
+                final_path = new_path
+                debug_print(f"File renamed to original filename: {original_filename}")
+                
+            except Exception as e:
+                debug_print(f"Warning: Could not rename to original filename: {e}")
+                # Continue with temp filename
+        
         # Send response
         response = bytearray([CMD_FILE_END, 0])  # Success
         response.extend(struct.pack("<I", bytes_received))  # Total bytes
@@ -508,14 +520,14 @@ def end_file_transfer():
         
         debug_print(f"Transfer complete: {bytes_received} bytes")
         # Show full path if not in default directory, otherwise just filename
-        display_path = current_path
-        if current_path.startswith(DEFAULT_SCRIPT_DIR):
-            display_path = current_path.split('/')[-1]
+        display_path = final_path
+        if final_path.startswith(DEFAULT_SCRIPT_DIR):
+            display_path = final_path.split('/')[-1]
         
-        update_display(f"Transfer complete:\n{display_path}\n{bytes_received} bytes", color=0x07E0, show_activity=False)
+        update_display(f"Transfer complete:\n{display_path}\n{bytes_received} bytes", color=COLOR_SUCCESS, show_activity=False)
         
         # Reset
-        file_path = current_path  # Save for display
+        file_path = final_path  # Save for display
         total_bytes = bytes_received
         
         # Clean up
@@ -544,7 +556,7 @@ def make_directory(path):
         response = bytearray([CMD_MKDIR, 0])  # Success
         ble.gatts_notify(conn_handle, tx_handle, response)
         
-        update_display(f"Created directory: {path}", color=0x07E0, show_activity=True)
+        update_display(f"Created directory: {path}", color=COLOR_SUCCESS, show_activity=True)
         
     except Exception as e:
         debug_print(f"Error creating directory: {e}")
@@ -579,7 +591,7 @@ def delete_directory(path):
         response = bytearray([CMD_DELETE_DIR, 0])  # Success
         ble.gatts_notify(conn_handle, tx_handle, response)
         
-        update_display(f"Deleted directory: {path}", color=0xF800, show_activity=True)  # Red for deletion
+        update_display(f"Deleted directory: {path}", color=COLOR_ERROR, show_activity=True)
         
     except Exception as e:
         debug_print(f"Error deleting directory: {e}")
@@ -603,7 +615,7 @@ def delete_file(path):
         response = bytearray([CMD_DELETE, 0])  # Success
         ble.gatts_notify(conn_handle, tx_handle, response)
         
-        update_display(f"Deleted file: {path}", color=0xF800, show_activity=True)  # Red for deletion
+        update_display(f"Deleted file: {path}", color=COLOR_ERROR, show_activity=True)
         
     except Exception as e:
         debug_print(f"Error deleting file: {e}")
@@ -624,13 +636,13 @@ def ble_irq(event, data):
         conn_handle = data[0]  # This should work regardless of tuple structure
         is_connected = True
         debug_print(f"Connected, handle: {conn_handle}")
-        update_display(f"Connected", color=0x07E0, show_activity=False)
+        update_display(f"Connected", color=COLOR_SUCCESS, show_activity=False)
         
     elif event == _IRQ_CENTRAL_DISCONNECT:
         is_connected = False
         debug_print("Disconnected")
         cleanup_transfer()
-        update_display("Disconnected. Ready.", color=0x001F, show_activity=False)
+        update_display("Disconnected. Ready.", color=COLOR_TRANSFER, show_activity=False)
         
         # Only restart advertising if not shutting down
         if not shutdown_requested:
@@ -686,7 +698,13 @@ def process_command(data):
             
     elif command == CMD_FILE_END:
         # End file transfer
-        end_file_transfer()
+        if len(data) > 1:
+            # Original filename provided for rename
+            original_filename_data = data[1:]
+            end_file_transfer(original_filename_data)
+        else:
+            # No original filename provided
+            end_file_transfer()
             
     elif command == CMD_MKDIR:
         # Make directory
