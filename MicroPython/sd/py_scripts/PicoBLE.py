@@ -76,6 +76,9 @@ current_file = None
 current_path = ""
 bytes_received = 0
 
+# Default upload directory for Python scripts
+DEFAULT_SCRIPT_DIR = "/sd/py_scripts"
+
 # Activity indicator
 activity_dots = 0
 activity_color = 0x07E0  # Green
@@ -228,6 +231,10 @@ def update_display_progress():
     # Instructions
     picocalc.display.text("Press ESC to cancel", 10, 280, 0xF800)  # Red
     
+    # Show target directory
+    if current_path.startswith(DEFAULT_SCRIPT_DIR):
+        picocalc.display.text("Target: py_scripts", 10, 200, 0x07E0)  # Green
+    
     # Show the display
     picocalc.display.show()
 
@@ -373,6 +380,14 @@ def start_file_transfer(path):
     """Start receiving a file"""
     global current_file, current_path, bytes_received, conn_handle, tx_handle
     
+    # If path is just a filename (no directory), use default script directory
+    if '/' not in path or path.startswith('/'):
+        # Extract just the filename
+        filename = path.split('/')[-1] if '/' in path else path
+        # Use default directory
+        path = f"{DEFAULT_SCRIPT_DIR}/{filename}"
+        debug_print(f"Using default directory: {DEFAULT_SCRIPT_DIR}")
+    
     debug_print(f"Starting file transfer to: {path}")
 
     try:
@@ -492,7 +507,12 @@ def end_file_transfer():
         ble.gatts_notify(conn_handle, tx_handle, response)
         
         debug_print(f"Transfer complete: {bytes_received} bytes")
-        update_display(f"Transfer complete:\n{current_path.split('/')[-1]}\n{bytes_received} bytes", color=0x07E0, show_activity=False)
+        # Show full path if not in default directory, otherwise just filename
+        display_path = current_path
+        if current_path.startswith(DEFAULT_SCRIPT_DIR):
+            display_path = current_path.split('/')[-1]
+        
+        update_display(f"Transfer complete:\n{display_path}\n{bytes_received} bytes", color=0x07E0, show_activity=False)
         
         # Reset
         file_path = current_path  # Save for display
@@ -650,7 +670,8 @@ def process_command(data):
             path = data[1:].decode('utf-8')
             list_directory(path)
         else:
-            list_directory("/sd")
+            # Default to py_scripts directory
+            list_directory(DEFAULT_SCRIPT_DIR)
             
     elif command == CMD_FILE_INFO:
         # Start file transfer

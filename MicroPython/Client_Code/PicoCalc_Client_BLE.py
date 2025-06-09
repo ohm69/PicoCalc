@@ -119,13 +119,14 @@ class EnhancedBLEClient:
         self.client = None
         self.device = None
         self.device_address = None
-        self.current_path = "/sd"
+        self.current_path = "/sd/py_scripts"  # Default to py_scripts
         self.response_buffer = bytearray()
         self.response_event = asyncio.Event()
         self.last_cmd = CMD_NONE
         self.verbose = False  # Enable verbose logging
         self.known_devices = self.load_known_devices()
         self.scan_timeout = 15.0  # Scan timeout in seconds
+        self.quick_mode = False  # Quick mode for simplified uploads
         
     def load_known_devices(self) -> Dict[str, DeviceInfo]:
         """Load known devices from config file"""
@@ -997,7 +998,8 @@ class EnhancedBLEClient:
 
 async def main():
     print("=== PicoCalc BLE File Transfer ===")
-    print("Enhanced with better device discovery\n")
+    print("Enhanced with better device discovery")
+    print("Default upload directory: /sd/py_scripts\n")
     client = EnhancedBLEClient()
     print(f"OS: {platform.system()} {platform.release()} | Python: {platform.python_version()}\n")
 
@@ -1010,7 +1012,7 @@ async def main():
         print("Connect failed.")
         return
 
-    cur_dir = "/sd"
+    cur_dir = "/sd/py_scripts"  # Default to py_scripts
     menu = {
         '1': ("Upload file", upload_file),
         '2': ("List directory", list_directory),
@@ -1019,6 +1021,7 @@ async def main():
         '5': ("Delete directory", delete_directory),  # Make sure this is the async function
         '6': ("Change directory", change_directory),
         '7': ("Toggle verbose", toggle_verbose),
+        '8': ("Quick upload to py_scripts", quick_upload),
         'q': ("Quit", None)
     }
 
@@ -1043,6 +1046,26 @@ async def main():
             print("Invalid selection.")
 
     await client.disconnect()
+
+async def quick_upload(client, _):
+    """Quick upload directly to py_scripts without directory navigation"""
+    print("\n=== Quick Upload to py_scripts ===")
+    print("This will upload files directly to /sd/py_scripts")
+    
+    # List local files
+    src = await client.select_local_file()
+    if not src:
+        return
+    
+    # Just use the filename, server will put it in py_scripts by default
+    print(f"\nUploading {src} to py_scripts...")
+    success = await client.upload_file(src, src)  # Just send filename
+    
+    if success:
+        print(f"\nFile uploaded successfully to py_scripts!")
+        print("You can now run it on PicoCalc using py_run.py")
+    else:
+        print("\nUpload failed.")
 
 # Make sure your delete_directory function is defined as async:
 async def delete_directory(client, cur_dir):
@@ -1070,7 +1093,16 @@ async def upload_file(client, cur_dir):
     if not src:
         return
 
-    dst = src
+    # Ask if user wants to specify a different destination name
+    print(f"\nSource file: {src}")
+    print(f"Default destination: {cur_dir}/{src}")
+    custom = input("Press Enter to use default, or type new filename: ").strip()
+    
+    if custom:
+        dst = custom
+    else:
+        dst = src
+    
     print(f"Uploading {src} to {cur_dir}/{dst}")
     success = await client.upload_file(src, f"{cur_dir}/{dst}")
     if not success:
@@ -1126,7 +1158,7 @@ async def delete_directory(client, cur_dir):
         print("No directories found in this directory.")
 
 async def change_directory(client, _):
-    current_path = "/sd"
+    current_path = "/sd/py_scripts"  # Start in py_scripts by default
 
     while True:
         dir_info = await client.list_directory(current_path)
