@@ -41,10 +41,16 @@ CMD_FILE_END = 4
 CMD_MKDIR = 5
 CMD_DELETE = 6
 CMD_DELETE_DIR = 7  # Command for directory deletion
+CMD_ACK = 8  # Acknowledgment command
+CMD_NACK = 9  # Negative acknowledgment
+CMD_FLOW_CONTROL = 10  # Flow control command
 
 # Chunk size for file transfer
-CHUNK_SIZE = 20  # Match server chunk size
-MAX_DEST_PATH_LENGTH = 64
+CHUNK_SIZE = 19   # BLE characteristic write limit (20 bytes - 1 for command byte)
+MAX_DEST_PATH_LENGTH = 18  # BLE characteristic write limit minus command byte
+MAX_RETRIES = 5  # Number of retries for sending chunks
+ACK_TIMEOUT = 2.0  # Timeout in seconds for waiting for ACK
+FLOW_CONTROL_WINDOW = 3  # Max chunks before requiring ACK
 
 # Config file for storing device preferences
 CONFIG_FILE = "picocalc_client_config.json"
@@ -80,18 +86,17 @@ class DeviceInfo:
         device.last_connected = data.get("last_connected", 0)
         return device
     
-def get_safe_filename(original_filename, max_total_path=20):
+def get_safe_filename(original_filename, max_total_path=64):
     """
-    Create a very short filename that fits BLE packet limits
-    - Uses single character + extension for maximum compatibility
-    - Ensures path stays under BLE packet limits
+    Create a safe filename that fits BLE packet limits
+    - Preserves original filename when possible
+    - Creates shortened versions only when necessary
     """
     import hashlib
     
     # Split the filename and extension
     if '.' in original_filename:
         name_part, ext_part = original_filename.rsplit('.', 1)
-        # Keep full extension - don't truncate it
         ext_part = '.' + ext_part
     else:
         name_part = original_filename
@@ -106,31 +111,24 @@ def get_safe_filename(original_filename, max_total_path=20):
     if len(original_filename) <= max_filename_length:
         return original_filename
     
-    # Create single letter + hash for very short names
+    # For longer names, try to preserve as much as possible
     hash_obj = hashlib.md5(name_part.encode())
+    hash_suffix = hash_obj.hexdigest()[:4]
     
-    # Calculate how much space we have for the name part
-    available_for_name = max_filename_length - len(ext_part)
+    # Calculate available space for the name part
+    available_for_name = max_filename_length - len(ext_part) - 5  # 5 for underscore + 4 char hash
     
-    # Always preserve extension if possible
-    if available_for_name >= 1 and ext_part:
-        # First letter + extension
-        first_letter = name_part[0].lower() if name_part else 'f'
-        new_name = first_letter + ext_part
-        
-        # If we have room, add a hash character
-        if available_for_name >= 2:
-            hash_char = hash_obj.hexdigest()[0]
-            new_name = first_letter + hash_char + ext_part
+    if available_for_name > 0:
+        # Truncate name and add hash to ensure uniqueness
+        truncated_name = name_part[:available_for_name]
+        new_name = f"{truncated_name}_{hash_suffix}{ext_part}"
     else:
-        # No extension or no room for extension
-        if max_filename_length >= 5:
-            # Use hash + generic extension
-            hash_part = hash_obj.hexdigest()[:3]
-            new_name = hash_part + ".tmp"
-        else:
-            # Very constrained, just use hash
+        # Very long extension or very restrictive limit
+        # Just use hash + extension (truncated if needed)
+        if len(ext_part) > max_filename_length - 8:
             new_name = hash_obj.hexdigest()[:max_filename_length]
+        else:
+            new_name = hash_obj.hexdigest()[:8] + ext_part
     
     return new_name
 
@@ -148,6 +146,7 @@ class EnhancedBLEClient:
         self.scan_timeout = 15.0  # Scan timeout in seconds
         self.quick_mode = False  # Quick mode for simplified uploads
         self.original_filename = None  # Store original filename for server rename
+        self._file_transfer_active = False  # Track if file transfer is active
         
     def load_known_devices(self) -> Dict[str, DeviceInfo]:
         """Load known devices from config file"""
@@ -634,7 +633,23 @@ class EnhancedBLEClient:
         if self.verbose:
             print(f"Received notification: {data.hex()}")
         
-        # Add data to buffer
+        # Check for ACK/NACK responses only during file transfer
+        if len(data) >= 1 and hasattr(self, '_file_transfer_active') and self._file_transfer_active:
+            cmd = data[0]
+            if cmd == CMD_ACK:
+                # Handle acknowledgment
+                if self.verbose:
+                    print(f"Received ACK for chunk {data[1] if len(data) > 1 else 'unknown'}")
+                self.response_event.set()
+                return
+            elif cmd == CMD_NACK:
+                # Handle negative acknowledgment
+                if self.verbose:
+                    print(f"Received NACK, expected chunk {data[1] if len(data) > 1 else 'unknown'}")
+                self.response_event.set()
+                return
+        
+        # Add data to buffer for other responses
         self.response_buffer.extend(data)
         
         # Set event to indicate response received
@@ -659,8 +674,16 @@ class EnhancedBLEClient:
                 print("Error: No TX characteristic available")
                 return bytearray()
             
-            # Send the command
-            await self.client.write_gatt_char(self.tx_char, cmd_data, response=True)
+            # Send the command with retries
+            for retry in range(MAX_RETRIES):
+                try:
+                    await self.client.write_gatt_char(self.tx_char, cmd_data, response=True)
+                    break
+                except Exception as e:
+                    if retry < MAX_RETRIES - 1:
+                        await asyncio.sleep(0.1 * (retry + 1))  # Exponential backoff
+                    else:
+                        raise e
             
             # Wait for response if we have notifications enabled
             if self.rx_char:
@@ -786,26 +809,26 @@ class EnhancedBLEClient:
                 return False
 
             # Extract directory and filename from dest_path
-            dest_dir = os.path.dirname(dest_path)
+            dest_dir = os.path.dirname(dest_path) if '/' in dest_path else ""
             original_filename = os.path.basename(dest_path)
-            safe_filename = get_safe_filename(original_filename, max_total_path=20)
             
-            # Create temp path for transfer
-            temp_upload_path = f"{dest_dir}/{safe_filename}" if dest_dir else safe_filename
-            
-            # Store original filename for server rename
-            self.original_filename = original_filename
-            
-            if safe_filename != original_filename:
-                print(f"Using temporary filename '{safe_filename}' for transfer")
-                print(f"Will rename to '{original_filename}' on server after upload")
+            # Check if we need to use a safe filename
+            full_path = dest_path if dest_path.startswith('/') else f"/sd/py_scripts/{dest_path}"
+            if len(full_path.encode('utf-8')) > MAX_DEST_PATH_LENGTH:
+                safe_filename = get_safe_filename(original_filename, max_total_path=MAX_DEST_PATH_LENGTH)
+                temp_upload_path = f"{dest_dir}/{safe_filename}" if dest_dir else safe_filename
+                self.original_filename = original_filename
+                
+                if safe_filename != original_filename:
+                    print(f"Using temporary filename '{safe_filename}' for transfer")
+                    print(f"Will rename to '{original_filename}' on server after upload")
+            else:
+                # Path is short enough, use original
+                safe_filename = original_filename
+                temp_upload_path = dest_path
+                self.original_filename = None
 
             upload_dest_path = temp_upload_path
-
-            if len(upload_dest_path.encode('utf-8')) > MAX_DEST_PATH_LENGTH:
-                print(f"Error: Full destination path too long ({len(upload_dest_path)} chars)")
-                print("Try uploading to a directory with a shorter path or shorten the filename.")
-                return False
 
             file_size = source.stat().st_size
             print(f"Uploading {source} ({file_size:,} bytes) to {upload_dest_path}")
@@ -816,21 +839,31 @@ class EnhancedBLEClient:
                 print(f"Error: Failed to start transfer. Response: {response.hex() if response else 'None'}")
                 return False
 
+            # Set file transfer active flag
+            self._file_transfer_active = True
+
             with open(source, "rb") as f:
                 bytes_sent = 0
+                
                 while True:
                     chunk = f.read(CHUNK_SIZE)
                     if not chunk:
                         break
+                    
+                    # Send chunk with simple retry logic
                     response = await self.send_command(CMD_FILE_DATA, chunk)
                     if not response or response[0] != CMD_FILE_DATA or response[1] != 0:
                         print(f"\nError: Failed to send data chunk at {bytes_sent} bytes")
+                        self._file_transfer_active = False
                         return False
+                    
                     bytes_sent += len(chunk)
                     progress = min(100, int(100 * bytes_sent / file_size))
                     bar = "█" * (progress // 5) + "░" * (20 - progress // 5)
                     print(f"\rProgress: [{bar}] {progress}% ({bytes_sent:,}/{file_size:,} bytes)", end="")
-                    await asyncio.sleep(0.05)
+                    
+                    # Small delay to prevent overwhelming the server
+                    await asyncio.sleep(0.01)
 
             # Send file end command with original filename for server rename
             original_filename_data = b''
@@ -846,10 +879,15 @@ class EnhancedBLEClient:
                 print(f"\nTransfer complete! File renamed to '{self.original_filename}' on server")
             else:
                 print("\nTransfer complete!")
+            
+            # Clear file transfer active flag
+            self._file_transfer_active = False
             return True
 
         except Exception as e:
             print(f"\nError uploading file: {e}")
+            # Clear file transfer active flag on error
+            self._file_transfer_active = False
             return False
 
     

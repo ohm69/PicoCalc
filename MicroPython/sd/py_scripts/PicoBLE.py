@@ -23,9 +23,12 @@ except ImportError:
     raise ImportError("Bluetooth module not found")
 
 # Configuration settings
-DEBUG_MODE = False  # Set to False to disable debug messages
-CHUNK_SIZE = 99     # Can be increased for better performance if supported by host
-MAX_RETRIES = 3     # Number of retries for operations
+DEBUG_MODE = True   # Enable for transfer debugging
+CHUNK_SIZE = 200    # Maximum BLE packet size for optimal performance
+MAX_RETRIES = 5     # Number of retries for operations
+ACK_TIMEOUT_MS = 1000  # Timeout for waiting for acknowledgments
+FLOW_CONTROL_DELAY_MS = 10  # Delay between chunks to prevent overflow
+MAX_PENDING_CHUNKS = 3  # Maximum chunks to send before requiring ACK
 
 # Define constants for BLE operation
 def get_device_name():
@@ -45,6 +48,9 @@ CMD_FILE_END = const(4)
 CMD_MKDIR = const(5)
 CMD_DELETE = const(6)
 CMD_DELETE_DIR = const(7)
+CMD_ACK = const(8)  # Acknowledgment command
+CMD_NACK = const(9) # Negative acknowledgment
+CMD_FLOW_CONTROL = const(10) # Flow control command
 
 # IRQ event codes
 _IRQ_CENTRAL_CONNECT = const(1)
@@ -252,17 +258,20 @@ def update_display_progress():
     picocalc.display.show()
 
 def ensure_directory_exists(path):
-    """Ensure all directories in path exist"""
-    # If it's a file path, extract the directory part
-    if '.' in path.split('/')[-1]:
-        path = '/'.join(path.split('/')[:-1])
+    """Ensure all directories in path exist (but not the file itself)"""
+    # Extract directory part - everything except the filename
+    directory_path = '/'.join(path.split('/')[:-1])
+    
+    # If no directory part, nothing to create
+    if not directory_path or directory_path == path:
+        return
     
     # Make sure it starts with /sd
-    if not path.startswith("/sd"):
-        path = "/sd/" + path.lstrip('/')
+    if not directory_path.startswith("/sd"):
+        directory_path = "/sd/" + directory_path.lstrip('/')
     
     # Create directory structure
-    parts = path.split('/')
+    parts = directory_path.split('/')
     current = ""
     for part in parts:
         if not part:  # Skip empty parts (like after initial /)
@@ -365,7 +374,7 @@ def list_directory(path):
         send_error_response(CMD_LIST_DIR)
 
 def send_chunked_data(data):
-    """Send response in chunks if needed"""
+    """Send response in chunks without sequence numbers for non-file transfers"""
     global conn_handle, tx_handle
     
     debug_print(f"Sending {len(data)} bytes in chunks of {CHUNK_SIZE}")
@@ -378,8 +387,8 @@ def send_chunked_data(data):
             try:
                 debug_print(f"Sending chunk {i//CHUNK_SIZE + 1}/{(len(data) + CHUNK_SIZE - 1)//CHUNK_SIZE}")
                 ble.gatts_notify(conn_handle, tx_handle, chunk)
-                # Delay between chunks - adjust based on client capabilities
-                time.sleep_ms(20)  # Reduced from 50ms for better performance
+                # Small delay between chunks
+                time.sleep_ms(10)
                 break  # Success, exit retry loop
             except Exception as e:
                 retry_count += 1
@@ -387,7 +396,7 @@ def send_chunked_data(data):
                 if retry_count >= MAX_RETRIES:
                     debug_print("Max retries exceeded, giving up")
                     return
-                time.sleep_ms(100)  # Wait before retry
+                time.sleep_ms(100 * retry_count)  # Exponential backoff
 
 def start_file_transfer(path):
     """Start receiving a file"""
@@ -414,18 +423,25 @@ def start_file_transfer(path):
         if not path.startswith("/sd"):
             path = "/sd/" + path.lstrip('/')
         
-        # Check for existing file and remove if needed
+        # Check for existing file/directory and handle appropriately
         try:
             stat_result = os.stat(path)
-            file_size = stat_result[6]  # Size is at index 6
-            print(f"Found existing file: {path}, size: {file_size} bytes")
-            try:
-                os.remove(path)
-                print(f"Successfully removed existing file: {path}")
-            except OSError as e:
-                print(f"Could not remove existing file ({e}), continuing...")
+            is_dir = (stat_result[0] & 0x4000) != 0
+            
+            if is_dir:
+                debug_print(f"Error: Path exists as directory: {path}")
+                send_error_response(CMD_FILE_INFO, "Path is a directory")
+                return
+            else:
+                file_size = stat_result[6]  # Size is at index 6
+                debug_print(f"Found existing file: {path}, size: {file_size} bytes")
+                try:
+                    os.remove(path)
+                    debug_print(f"Successfully removed existing file: {path}")
+                except OSError as e:
+                    debug_print(f"Could not remove existing file ({e}), continuing...")
         except OSError:
-            print(f"No existing file at {path}")
+            debug_print(f"No existing file at {path}")
             
         # Ensure directory exists
         ensure_directory_exists(path)
@@ -456,16 +472,19 @@ def receive_file_data(data):
             send_error_response(CMD_FILE_DATA)
             return
             
-        # Write data to file
-        current_file.write(data)
+        # Write data to file (no sequence extraction for now)
+        bytes_written = current_file.write(data)
+        current_file.flush()  # Force write to storage immediately
         bytes_received += len(data)
         
-        # Send response
+        debug_print(f"Received {len(data)} bytes, wrote {bytes_written}, total: {bytes_received}")
+        
+        # Send simple ACK response
         response = bytearray([CMD_FILE_DATA, 0])  # Success
         ble.gatts_notify(conn_handle, tx_handle, response)
         
         # Update display periodically (less frequently for better performance)
-        if bytes_received % (CHUNK_SIZE * 10) == 0:  # Update every ~200 bytes with default CHUNK_SIZE
+        if bytes_received % (CHUNK_SIZE * 10) == 0:  # Update every ~2400 bytes
             update_display_progress()
             
     except Exception as e:
@@ -525,10 +544,6 @@ def end_file_transfer(original_filename_data=b''):
             display_path = final_path.split('/')[-1]
         
         update_display(f"Transfer complete:\n{display_path}\n{bytes_received} bytes", color=COLOR_SUCCESS, show_activity=False)
-        
-        # Reset
-        file_path = final_path  # Save for display
-        total_bytes = bytes_received
         
         # Clean up
         cleanup_transfer()
@@ -607,6 +622,20 @@ def delete_file(path):
         # Ensure path starts with /sd
         if not path.startswith("/sd"):
             path = "/sd/" + path.lstrip('/')
+        
+        # Check if path exists and is a file
+        try:
+            stat_result = os.stat(path)
+            is_dir = (stat_result[0] & 0x4000) != 0
+            
+            if is_dir:
+                debug_print(f"Error: Path is a directory, not a file: {path}")
+                send_error_response(CMD_DELETE, "Path is a directory")
+                return
+        except OSError:
+            debug_print(f"Error: File not found: {path}")
+            send_error_response(CMD_DELETE, "File not found")
+            return
             
         # Delete file
         os.remove(path)
