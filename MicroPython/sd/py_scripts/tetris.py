@@ -349,8 +349,6 @@ class TetrisGame:
             if self.level > old_level:
                 self.sound.sound_level_up()
             self.fall_speed = max(100, 1000 - (self.level - 1) * 80)
-            
-            print(f"Lines cleared: {lines_count}, Score: {self.score}")
     
     def rotate_piece(self):
         """Rotate current piece"""
