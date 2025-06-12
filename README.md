@@ -16,7 +16,8 @@ A MicroPython firmware and script collection for the Clockwork Pi PicoCalc handh
 MicroPython/
 ├── boot.py                     ← main boot script
 ├── Client_Code/                ← BLE client applications
-│   └── PicoCalc_Client_BLE.py
+│   ├── PicoCalc_Client_BLE.py  ← BLE client for PicoCalc
+│   └── picocalc_client_config.json ← client configuration
 ├── firmware/                   ← prebuilt UF2 firmware images
 │   └── picocalc_micropython_pico2w.uf2
 ├── modules/                    ← custom MicroPython modules
@@ -33,6 +34,7 @@ MicroPython/
 │   ├── pye.py                 ← text editor
 │   ├── sdcard.py              ← SD card operations
 │   └── vt.py                  ← terminal emulation
+├── pico_sdk_import.cmake       ← CMake SDK import
 ├── picocalcdisplay/            ← display driver & graphics
 │   ├── font6x8e500.h
 │   ├── micropython.cmake
@@ -41,20 +43,27 @@ MicroPython/
 │   └── picocalcdisplay.h
 ├── sd/
 │   └── py_scripts/             ← application scripts
-│       ├── PicoBLE.py          ← Bluetooth functionality
-│       ├── ProxiScan.py        ← proximity scanning
-│       ├── ProxiScan_2.0.py    ← enhanced proximity scan
-│       ├── ProxiScan_3.0.py    ← latest proximity scan
-│       ├── WiFiManager.py      ← WiFi management
-│       ├── brad.py             ← custom application
-│       ├── flush_menu.py       ← menu flushing utility
-│       ├── picocalc_ollama.py  ← Ollama integration
-│       ├── sd_chk.py           ← SD card checker
-│       ├── sim.py              ← simulator
-│       ├── start_ollama.sh     ← Ollama startup script
-│       ├── synth.py            ← synthesizer engine
-│       ├── test_script.py      ← test routines
-│       └── tetris.py           ← Tetris game
+│       ├── FoxHunt_competition.py ← ARDF competition scanner
+│       ├── FoxHunt_lite.py     ← lightweight fox hunting
+│       ├── NetworkTools.py     ← unified network tools launcher
+│       ├── PicoBLE.py          ← Bluetooth Low Energy tools
+│       ├── ProxiScan_3.0.py    ← advanced proximity scanner
+│       ├── ProxiScan_compact.py ← compact proximity scanner
+│       ├── README.md           ← py_scripts documentation
+│       ├── WiFiManager.py      ← WiFi connection management
+│       ├── archive/            ← archived script versions
+│       │   ├── ProxiScan_v1.py
+│       │   ├── ProxiScan_v2.py
+│       │   ├── README.md
+│       │   └── WiFiManager_classic.py
+│       ├── brad.py             ← utility functions
+│       ├── flush_menu.py       ← menu system utilities
+│       ├── picocalc_ollama.py  ← Ollama LLM integration
+│       ├── sd_chk.py           ← SD card health checker
+│       ├── sim.py              ← device simulator
+│       ├── start_ollama.sh     ← Ollama server startup
+│       ├── synth.py            ← advanced synthesizer
+│       └── tetris.py           ← Tetris game with sound
 ├── sd_chk.py                   ← SD check utility
 ├── vtterminal/                 ← VT100 terminal emulator
 │   ├── font6x8.h
