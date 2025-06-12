@@ -66,7 +66,8 @@ class FoxHuntScanner:
         # Audio feedback
         try:
             self.audio = PWM(Pin(AUDIO_PIN))
-        except:
+        except (OSError, ValueError) as e:
+            print(f"Audio setup failed: {e}")
             self.audio = None
         
         # Scanner state
@@ -87,6 +88,10 @@ class FoxHuntScanner:
         self.signal_strength = 0
         self.last_rssi = -100
         
+        # Performance optimization - cache compass points
+        self.compass_cache = None
+        self.last_bearing_drawn = -1
+        
         # Input buffer
         self.key_buffer = bytearray(10)
         
@@ -100,7 +105,7 @@ class FoxHuntScanner:
         self.last_update = utime.ticks_ms()
         self.last_device_count = 0
         
-        print("🦊 Fox Hunt Scanner 3.0 initialized")
+        print("Fox Hunt Scanner 3.0 initialized")
         self.update_display()
     
     def ble_irq(self, event, data):
@@ -219,18 +224,15 @@ class FoxHuntScanner:
     def stop_scan(self):
         """Stop BLE scanning"""
         try:
-            self.scanning = False  # Set flag first to stop processing events
+            # Stop scanning first
             self.ble.gap_scan(None)
-            # Force stop by disabling and re-enabling BLE
-            self.ble.active(False)
-            utime.sleep_ms(50)
-            self.ble.active(True)
-            utime.sleep_ms(50)
+            utime.sleep_ms(100)  # Give time for scan to stop
+            self.scanning = False  # Set flag after scan stopped
             self.last_scan_start = 0  # Reset scan timer
-            # Clear devices when stopping
-            self.devices.clear()
+            # Keep devices for analysis - don't clear
         except Exception as e:
             print(f"Scan stop failed: {e}")
+            self.scanning = False  # Ensure flag is set even on error
     
     def select_target(self):
         """Select strongest device as target"""
@@ -264,7 +266,7 @@ class FoxHuntScanner:
         """Draw scanning interface"""
         # Header
         self.display.rect(0, 0, self.width, 30, COLOR_HEADER)
-        self.display.text("🦊 FOX HUNT SCANNER 3.0", 5, 8, COLOR_HEADER)
+        self.display.text("FOX HUNT SCANNER 3.0", 5, 8, COLOR_HEADER)
         self.display.text(f"MODE: {self.mode_names[self.mode]}", 5, 18, COLOR_HIGHLIGHT)
         
         # Device count and scan info
@@ -288,31 +290,37 @@ class FoxHuntScanner:
             self.display.text(f"Devices Found: {device_count}", 10, 55, COLOR_NORMAL)
             self.display.text(f"Scans: {self.scan_count}", 10, 70, COLOR_DIM)
             
-            # Device list (top 8 by signal strength)
+            # Device list (top 6 by signal strength for less clutter)
             y_start = 90
+            max_devices = min(6, (self.height - y_start - 80) // 35)  # Dynamic based on screen height
             sorted_devices = sorted(self.devices.items(), 
-                                  key=lambda x: x[1]['rssi'], reverse=True)[:8]
+                                  key=lambda x: x[1]['rssi'], reverse=True)[:max_devices]
             
             for i, (mac, data) in enumerate(sorted_devices):
-                y = y_start + i * 30  # Increased spacing from 25 to 30
+                y = y_start + i * 35  # Increased spacing to prevent overlap
+                
+                # Skip if would go off screen
+                if y + 30 > self.height - 80:
+                    break
                 
                 # Device box - color based on signal strength
                 box_color = COLOR_NORMAL if data['rssi'] > -70 else COLOR_DIM
-                self.display.rect(5, y, self.width - 10, 28, box_color)  # Increased height from 23 to 28
+                self.display.rect(5, y, self.width - 10, 32, box_color)
                 
-                # Signal strength bar - gradient based on strength
-                signal_width = max(1, min(50, (data['rssi'] + 100) * 2))
-                bar_color = COLOR_HIGHLIGHT if data['rssi'] > -60 else (COLOR_NORMAL if data['rssi'] > -75 else COLOR_DIM)
-                self.display.fill_rect(8, y + 3, signal_width, 5, bar_color)
+                # Signal strength bar - simplified
+                signal_width = int(max(2, min(40, (data['rssi'] + 100) * 1.5)))
+                bar_color = COLOR_HIGHLIGHT if data['rssi'] > -60 else COLOR_NORMAL
+                self.display.fill_rect(8, y + 3, signal_width, 4, bar_color)
                 
-                # Device info - color based on signal and rank
+                # Device info - more compact layout
                 short_mac = mac[-8:]
-                name = data['name'][:15] if len(data['name']) > 15 else data['name']
-                mac_color = COLOR_HIGHLIGHT if i == 0 else COLOR_NORMAL  # Highlight strongest
-                rssi_color = COLOR_SUCCESS if data['rssi'] > -60 else (COLOR_NORMAL if data['rssi'] > -75 else COLOR_DIM)
-                self.display.text(f"{short_mac}", 8, y + 11, mac_color)
-                self.display.text(f"{data['rssi']}dBm {data['distance']:.1f}ft", 120, y + 11, rssi_color)
-                self.display.text(f"{name}", 8, y + 19, COLOR_NORMAL)
+                name = data['name'][:12] if data['name'] else "[No Name]"
+                mac_color = COLOR_HIGHLIGHT if i == 0 else COLOR_NORMAL
+                
+                # Top line: MAC and RSSI
+                self.display.text(f"{short_mac} {data['rssi']}dBm", 8, y + 10, mac_color)
+                # Bottom line: Name and distance
+                self.display.text(f"{name} {data['distance']:.1f}ft", 8, y + 22, COLOR_DIM)
         
         # Controls
         self.draw_scan_controls()
@@ -321,7 +329,7 @@ class FoxHuntScanner:
         """Draw hunting interface with compass"""
         # Header
         self.display.rect(0, 0, self.width, 25, COLOR_HEADER)
-        self.display.text("🎯 HUNTING MODE", 5, 5, COLOR_HEADER)
+        self.display.text("HUNTING MODE", 5, 5, COLOR_HEADER)
         self.display.text(f"Target: {self.target_name[:12]}", 5, 15, COLOR_HIGHLIGHT)
         
         # Target info
@@ -442,7 +450,7 @@ class FoxHuntScanner:
     
     def draw_track_mode(self):
         """Draw tracking mode with detailed target info"""
-        self.display.text("📡 TRACKING MODE", 10, 10, COLOR_HEADER)
+        self.display.text("TRACKING MODE", 10, 10, COLOR_HEADER)
         
         if self.target_mac and len(self.target_history) > 0:
             latest = self.target_history[-1]
@@ -489,24 +497,21 @@ class FoxHuntScanner:
     
     def handle_input(self):
         """Handle keyboard input"""
-        if not picocalc.terminal:
+        # Check if we have terminal input available
+        if hasattr(picocalc, 'terminal') and picocalc.terminal:
+            count = picocalc.terminal.readinto(self.key_buffer)
+            if not count:
+                return False
+            key_data = bytes(self.key_buffer[:count])
+        else:
+            # Fallback for serial/REPL mode - skip input handling
+            # In serial mode, rely on menu-based interface instead
             return False
-        
-        count = picocalc.terminal.readinto(self.key_buffer)
-        if not count:
-            return False
-        
-        key_data = bytes(self.key_buffer[:count])
         
         # Check for space key first (priority handling)
         if b' ' in key_data or (count == 1 and self.key_buffer[0] == 32):
             if self.mode == MODE_SCAN:
-                # Toggle scanning
-                if self.scanning:
-                    self.stop_scan()
-                else:
-                    self.start_scan()
-                self.update_display()  # Update display to show new state
+                self.toggle_scanning()
             return True
         
         # Check for ESC key (exit) - handle different ESC sequences
@@ -532,26 +537,10 @@ class FoxHuntScanner:
         if count == 1:
             key = self.key_buffer[0]
             
-            # Space key - start/stop scan (handle space character)
-            if key == ord(' ') or key == 32:
+            # P key - start/stop scan
+            if key == ord('p') or key == ord('P'):
                 if self.mode == MODE_SCAN:
-                    # Toggle scanning
-                    if self.scanning:
-                        self.stop_scan()
-                    else:
-                        self.start_scan()
-                    self.update_display()  # Update display to show new state
-                return True
-            
-            # P key - alternative start/stop scan
-            elif key == ord('p') or key == ord('P'):
-                if self.mode == MODE_SCAN:
-                    # Toggle scanning
-                    if self.scanning:
-                        self.stop_scan()
-                    else:
-                        self.start_scan()
-                    self.update_display()  # Update display to show new state
+                    self.toggle_scanning()
                 return True
             
             elif key == ord('h') or key == ord('H'):  # Hunt mode
@@ -589,6 +578,14 @@ class FoxHuntScanner:
         
         return True
     
+    def toggle_scanning(self):
+        """Toggle scanning state in scan mode"""
+        if self.scanning:
+            self.stop_scan()
+        else:
+            self.start_scan()
+        self.update_display()  # Update display to show new state
+    
     def log_target_data(self):
         """Log current target data to file"""
         if not self.target_mac or not self.target_history:
@@ -596,7 +593,7 @@ class FoxHuntScanner:
             self.display.fill_rect(10, self.height - 60, self.width - 20, 40, COLOR_BLACK)
             self.display.text("No target data to log", 20, self.height - 50, COLOR_WARNING)
             self.display.show()
-            utime.sleep_ms(1000)
+            utime.sleep_ms(300)
             self.update_display()
             return
         
@@ -617,27 +614,27 @@ class FoxHuntScanner:
             
             # Show success message on display
             self.display.fill_rect(10, self.height - 60, self.width - 20, 40, COLOR_BLACK)
-            self.display.text("✓ Target data logged!", 20, self.height - 50, COLOR_SUCCESS)
+            self.display.text("Target data logged!", 20, self.height - 50, COLOR_SUCCESS)
             self.display.show()
-            utime.sleep_ms(1000)
+            utime.sleep_ms(300)
             self.update_display()
         except Exception as e:
             # Show error message on display
             self.display.fill_rect(10, self.height - 60, self.width - 20, 40, COLOR_BLACK)
             self.display.text("Log error!", 20, self.height - 50, COLOR_WARNING)
             self.display.show()
-            utime.sleep_ms(1000)
+            utime.sleep_ms(300)
             self.update_display()
     
     def update_animation(self):
         """Update animations"""
         current_time = utime.ticks_ms()
-        if current_time - self.last_update > 500:  # Reduced to 2 FPS to prevent flickering
+        if current_time - self.last_update > 1000:  # Reduced to 1 FPS to save CPU
             self.animation_phase = (self.animation_phase + 1) % 360
             
-            # Simulate slight bearing drift in hunt mode
-            if self.mode == MODE_HUNT and self.target_mac:
-                drift = math.sin(self.animation_phase * 0.1) * 2
+            # Simulate slight bearing drift in hunt mode (only if actively tracking)
+            if self.mode == MODE_HUNT and self.target_mac and self.target_mac in self.devices:
+                drift = math.sin(self.animation_phase * 0.05) * 1  # Reduced drift
                 self.bearing = (self.bearing + drift) % 360
             
             self.last_update = current_time
@@ -657,6 +654,15 @@ class FoxHuntScanner:
     
     def run(self):
         """Main scanner loop"""
+        # Check if terminal input is available
+        if not hasattr(picocalc, 'terminal') or not picocalc.terminal:
+            print("ProxiScan 3.0 requires direct hardware interface")
+            print("When connected via serial, please use:")
+            print("- ProxiScan_compact for basic BLE scanning")
+            print("- FoxHunt_lite for text-based fox hunting")
+            input("\nPress Enter to exit...")
+            return
+        
         try:
             while True:
                 # Handle input
