@@ -15,9 +15,32 @@ def show_menu():
     print("3. Fox Hunt Lite (Text)")
     print("4. Fox Hunt Competition")
     print("5. Fox Hunt Pro (Graphics)")
-    print("6. Exit")
+    print("6. Set clock with Network Time Protocol")
+    print("0. Exit")
     
-    return input("\nSelect tool (1-6): ").strip()
+    return input("\nSelect tool (0-6): ").strip()
+
+def ntp_sync():
+    """Sync internal clock with NTP server"""
+    try:
+        print("\nLaunching NTP sync...")
+        import time, ntptime
+        year, month, day, hour, minute, second, weekday, yearday = time.localtime()
+        print(f"Before sync: {hour:02d}:{minute:02d}:{second:02d} {day:02d}.{month:02d}.{year}")
+        
+        ntptime.settime()
+        
+        year, month, day, hour, minute, second, weekday, yearday = time.localtime()
+        print(f"After sync:  {hour:02d}:{minute:02d}:{second:02d} {day:02d}.{month:02d}.{year}")
+    except Exception as e:
+        print(f"Error: {e}")
+    finally:
+        # Clean up
+        try:
+            del time, ntptime
+        except:
+            pass
+        gc.collect()
 
 def main():
     """Main launcher"""
@@ -99,6 +122,9 @@ def main():
                 gc.collect()
                 
         elif choice == "6":
+            ntp_sync()
+                
+        elif choice == "0":
             print("Goodbye!")
             break
         else:
